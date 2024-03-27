@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Matrix Display</title>
+    <style>
+        table {
+            border-collapse: collapse;
+            border-spacing: 0;
+            margin: auto;
+        }
+
+        td.custom-td {
+            width: 30px;
+            height: 30px;
+            border: 1px solid #ddd;
+            text-align: center;
+            vertical-align: middle;
+            font-family: Candara, sans-serif;
+            font-size: 20px;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        .hint {
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .highlight {
+            background-color: #ffdd59;
+        }
+    </style>
+</head>
+<body>
+<div class="container mt-3">
+    <div class="row">
+        <div class="col">
+            <table class="square-table">
+                <tbody id="matrix-table"></tbody>
+            </table>
+        </div>
+        <div class="col">
+            <div id="hints"></div>
+        </div>
+    </div>
+</div>
+
+<link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
+
+<script>
+    // Example matrix data
+    let matrix = [['f', 'm', 'b', 'u', 'r', 'g', 'e', 'r', 'p', 's'],
+        ['r', 'i', 's', 'a', 'l', 'a', 'd', 'i', 'a', 'p'],
+        ['u', 'l', 'o', 'b', 'o', 'w', 'l', 'c', 's', 'o'],
+        ['i', 'k', 'd', 'p', 'l', 'a', 't', 'e', 't', 'o'],
+        ['t', 't', 'a', 's', 't', 'e', 'b', 'e', 'a', 'n'],
+        ['c', 'o', 'r', 'n', 'f', 'e', 'a', 's', 't', 'j'],
+        ['h', 'a', 'y', 'm', 'e', 'n', 'u', 'f', 'a', 'u'],
+        ['e', 's', 'p', 'i', 'z', 'z', 'a', 'o', 'b', 'i'],
+        ['f', 't', 'g', 'l', 'a', 's', 's', 'r', 'l', 'c'],
+        ['s', 'u', 's', 'h', 'i', 'c', 'a', 'k', 'e', 'e']];
+
+    let hints = [{
+            "word": "pizza",
+            "hint": "A round food with bread at the bottom. It has sauce, cheese, and things like meat or veggies on top."
+        }, {
+            "word": "cake",
+            "hint": "A sweet food that is often for birthdays. It can have creamy layers and fun decorations."
+        }, {"word": "juice", "hint": "A drink made from squeezing fruits or vegetables."}, {
+            "word": "soda",
+            "hint": "A sweet drink with bubbles. It comes in many tastes like cola or lemon."
+        }, {
+            "word": "burger",
+            "hint": "A meat between two pieces of bread. It can also have salad and cheese."
+        }, {"word": "salad", "hint": "Different raw veggies mixed together, often with a special sauce."}, {
+            "word": "toast",
+            "hint": "Bread made brown and crispy by heating. It's yummy with butter or sweet spread."
+        }, {
+            "word": "fruit",
+            "hint": "Sweet parts of plants that we can eat without cooking."
+        }, {
+            "word": "sushi",
+            "hint": "A food from Japan with special rice, seafood, and sometimes veggies, wrapped in seaweed."
+        }, {
+            "word": "pasta",
+            "hint": "Food made from flour and water, shaped in many ways like long strings or tubes."
+        }, {
+            "word": "milk",
+            "hint": "A white drink from animals like cows or goats. It's good for your bones."
+        }, {
+            "word": "corn",
+            "hint": "A yellow food that grows in the field. It can be eaten whole or popped."
+        }, {"word": "rice", "hint": "Tiny white or brown pieces that we cook and eat with other foods."}, {
+            "word": "bean",
+            "hint": "Small seeds that can be many colors. We cook and eat them."
+        }, {"word": "chef", "hint": "Someone who cooks food in a restaurant."}, {
+            "word": "menu",
+            "hint": "A list of all the foods and drinks you can choose to eat at a restaurant."
+        }, {"word": "fork", "hint": "A tool with sharp points we use to pick up and eat our food."}, {
+            "word": "spoon",
+            "hint": "A tool with a round part used to eat or serve foods that are liquid or soft."
+        }, {"word": "plate", "hint": "A flat piece we put our food on to eat."}, {
+            "word": "bowl",
+            "hint": "A deep dish for holding foods or liquids."
+        }, {"word": "feast", "hint": "A very big meal with lots of different foods, for celebrating."}, {
+            "word": "taste",
+            "hint": "How food or drink feels in your mouth."
+        }, {"word": "table", "hint": "Furniture with a flat top where we eat or work."}, {
+            "word": "glass",
+            "hint": "A clear thing we drink out of."
+        }]
+    ;
+
+    function generateTable(matrix) {
+        const tableBody = document.getElementById('matrix-table');
+        tableBody.innerHTML = '';
+
+        matrix.forEach((row, rowIndex) => {
+            let tr = document.createElement('tr');
+            row.forEach((cell, cellIndex) => {
+                let td = document.createElement('td');
+                td.classList.add('custom-td');
+                td.textContent = cell.toUpperCase();
+                td.dataset.row = rowIndex;
+                td.dataset.col = cellIndex;
+                tr.appendChild(td);
+            });
+            tableBody.appendChild(tr);
+        });
+    }
+
+    function displayHints(hints) {
+        const hintsDiv = document.getElementById('hints');
+        hintsDiv.innerHTML = '';
+
+        hints.forEach((hintObj) => {
+            let p = document.createElement('p');
+            p.textContent = hintObj.hint;
+            p.classList.add('hint');
+            p.dataset.word = hintObj.word;
+            p.onclick = function () {
+                highlightWord(this.dataset.word);
+            };
+            hintsDiv.appendChild(p);
+        });
+    }
+
+    function highlightWord(word) {
+        // Reset any previous highlights
+        document.querySelectorAll('.highlight').forEach(cell => {
+            cell.classList.remove('highlight');
+        });
+
+        // Logic to find and highlight the word in the table
+        let wordFound = false;
+        matrix.forEach((row, rowIndex) => {
+            let joinedRow = row.join('');
+            let startIndex = joinedRow.indexOf(word);
+            if (startIndex !== -1) {
+                wordFound = true;
+                for (let i = 0; i < word.length; i++) {
+                    let cell = document.querySelector(`td[data-row="${rowIndex}"][data-col="${startIndex + i}"]`);
+                    cell.classList.add('highlight');
+                }
+            }
+        });
+
+        for (let col = 0; col < matrix[0].length && !wordFound; col++) {
+            let colString = matrix.map(row => row[col]).join('');
+            let startIndex = colString.indexOf(word);
+            if (startIndex !== -1) {
+                for (let row = startIndex; row < startIndex + word.length; row++) {
+                    let cell = document.querySelector(`td[data-row="${row}"][data-col="${col}"]`);
+                    cell.classList.add('highlight');
+                }
+                wordFound = true;
+            }
+        }
+
+        if (!wordFound) {
+            alert('Word not found in the matrix!');
+        }
+    }
+
+    document.addEventListener('DOMContentLoaded', function () {
+        generateTable(matrix);
+        displayHints(hints);
+    });
+</script>
+</body>
+</html>

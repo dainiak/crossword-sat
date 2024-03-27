@@ -1,4 +1,4 @@
-from pycryptosat import Solver
+from pysat.solvers import Mergesat3
 from itertools import combinations, product, count
 from datetime import datetime
 
@@ -91,31 +91,30 @@ def make_problem(words, x_bound, y_bound):
     clauses.extend(generate_crossing_constraints(words, is_in_hor_mode, is_x_coord, is_y_coord, True, True))
     clauses.extend(ensure_nonempty_first_row_and_column(is_x_coord, is_y_coord))
     clauses.extend(ensure_exactly_one_word_placement(words, is_in_hor_mode, is_x_coord, is_y_coord, is_placed))
-    clauses.extend(forbid_cells(words, is_in_hor_mode, is_x_coord, is_y_coord, [(3, 8), (6, 8), (2, 6)]))
+    # clauses.extend(forbid_cells(words, is_in_hor_mode, is_x_coord, is_y_coord, [(3, 8), (6, 8), (2, 6)]))
     clauses = list(set(map(tuple, map(sorted, clauses))))
     clauses.sort()
     return clauses, words, is_in_hor_mode, is_placed, is_x_coord, is_y_coord
 
 
 def solve_problem(clauses, words, is_in_hor_mode, is_placed, is_x_coord, is_y_coord):
-    solver = Solver()
-    for clause in set(map(tuple, map(sorted, clauses))):
-        solver.add_clause(clause)
+    with Mergesat3() as solver:
+        for clause in clauses:
+            solver.add_clause(clause)
 
-    sat, solution = solver.solve()
-    print('formula is', f'{"" if sat else "un"}satisfiable')
+        if not solver.solve():
+            return []
 
-    if not sat:
-        return []
-    return [
-        {
-            "word": w,
-            "x": next(x for x, vx in enumerate(is_x_coord[iw]) if solution[vx]),
-            "y": next(y for y, vy in enumerate(is_y_coord[iw]) if solution[vy]),
-            "horizontal": is_in_hor_mode[iw]
-        }
-        for iw, w in enumerate(words) if solution[is_placed[iw]]
-    ]
+        model = solver.get_model()
+        return [
+            {
+                "word": w,
+                "x": next(x for x, vx in enumerate(is_x_coord[iw]) if vx in model),
+                "y": next(y for y, vy in enumerate(is_y_coord[iw]) if vy in model),
+                "horizontal": is_in_hor_mode[iw]
+            }
+            for iw, w in enumerate(words) if is_placed[iw] in model
+        ]
 
 
 def print_solution(placement_data, x_bound, y_bound):
@@ -138,10 +137,16 @@ def print_solution(placement_data, x_bound, y_bound):
 def main():
     words = [
         "pizza", "cake", "juice", "soda", "burger", "salad", "toast", "fruit", "sushi", "pasta", "milk",
-        "corn", "rice", "bean", "chef", "menu", "fork", "spoon", "plate", "bowl", "feast", "taste"
+        "corn", "rice", "bean", "chef", "menu", "fork", "spoon", "plate", "bowl", "feast", "taste", "table", "glass"
     ]
-    x_bound = 10
-    y_bound = 10
+
+    words = [
+        "elephant","giraffe","tiger","zebra","kangaroo","penguin","lion","monkey","bear","rabbit","ant","rat","bee",
+        "turtle","frog","duck","fish","shark","whale","dolphin","octopus","butterfly","swan","eagle","owl","parrot","bat"
+    ]
+
+    x_bound = 11
+    y_bound = 11
 
     stage_1_start = datetime.now()
     print("Generating clauses...")
@@ -159,3 +164,62 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+# Solving took  44.281376 s using MergeSat3
+# Solution:
+# f m b u r g e r p s
+# r i s a l a d i a p
+# u l o b o w l c s o
+# i k d p l a t e t o
+# t t a s t e b e a n
+# c o r n f e a s t j
+# h a y m e n u f a u
+# e s p i z z a o b i
+# f t g l a s s r l c
+# s u s h i c a k e e
+#
+
+
+# Solving took  182.722628 s
+# Solution:
+# r a b b i t i g e r o
+# b p e n g u i n l k c
+# u d g i r a f f e a t
+# t o d w e o i z p n o
+# t l u h a w s e h g p
+# e p c a g l h b a a u
+# r h k l l i a r n r s
+# f i b e e o r a t o w
+# l n e m o n k e y o a
+# y b a t u r t l e · n
+# p a r r o t f r o g t
+
+# [
+#     {"word": "elephant", "hint": "A very large animal with grey skin, big ears that look like fans, and a long trunk."},
+#     {"word": "giraffe", "hint": "The tallest animal that walks on land, with a very long neck and legs, and spots on its body."},
+#     {"word": "tiger", "hint": "A big cat with orange fur and black stripes, known for its powerful build."},
+#     {"word": "zebra", "hint": "Looks like a horse but with black and white stripes all over its body."},
+#     {"word": "kangaroo", "hint": "An animal that hops on its hind legs and carries its baby in a pouch."},
+#     {"word": "penguin", "hint": "A black and white bird that cannot fly but swims very well and lives in cold places."},
+#     {"word": "lion", "hint": "Known as the 'king of the jungle,' this animal has a big mane and a loud roar."},
+#     {"word": "monkey", "hint": "A playful animal that loves to climb trees and has a tail."},
+#     {"word": "bear", "hint": "A large, furry animal that can stand on two legs and loves honey."},
+#     {"word": "rabbit", "hint": "A small, fluffy animal with long ears and a short tail that hops."},
+#     {"word": "ant", "hint": "A tiny insect that works very hard, lifting things much heavier than itself."},
+#     {"word": "rat", "hint": "A small animal with a long tail, known for being clever and quick."},
+#     {"word": "bee", "hint": "A small, buzzing insect that makes honey and has yellow and black stripes."},
+#     {"word": "turtle", "hint": "An animal with a hard shell that it can hide inside, both on land and in water."},
+#     {"word": "frog", "hint": "A small, green creature that jumps very high and says 'ribbit'."},
+#     {"word": "duck", "hint": "A bird with webbed feet, good for swimming, and says 'quack'."},
+#     {"word": "fish", "hint": "An animal that lives in water, breathes through gills, and has fins to swim."},
+#     {"word": "shark", "hint": "A big fish with sharp teeth, known as a powerful swimmer in the ocean."},
+#     {"word": "whale", "hint": "The biggest animal in the world, living in the ocean and breathing air through a blowhole."},
+#     {"word": "dolphin", "hint": "A smart, friendly sea animal that can jump high out of the water and makes clicking noises."},
+#     {"word": "octopus", "hint": "A sea creature with eight long arms, known for being very clever and can change color."},
+#     {"word": "butterfly", "hint": "A flying insect with colorful wings and it starts life as a caterpillar."},
+#     {"word": "swan", "hint": "A graceful bird with a long neck, usually white, known for swimming in lakes."},
+#     {"word": "eagle", "hint": "A large bird with very good eyesight, known for flying very high."},
+#     {"word": "owl", "hint": "A bird that can turn its head almost all the way around and is active at night."},
+#     {"word": "parrot", "hint": "A colorful bird that can mimic sounds and words it hears."},
+#     {"word": "bat", "hint": "The only mammal that can fly, known for its echo-location ability and being active at night."}
+# ]
