@@ -1,9 +1,12 @@
 from pysat.solvers import Mergesat3
+import pysat.card as card
+from pysat.formula import IDPool
+
 from itertools import combinations, product, count
 from datetime import datetime
 
 
-def generate_crossing_constraints(words, is_in_hor_mode, is_x_coord, is_y_coord, allow_horizontal_word_overlap, allow_vertical_word_overlap):
+def generate_crossing_constraints(words, is_in_hor_mode, is_x_coord, is_y_coord, allow_horizontal_overlaps, allow_vertical_overlaps, register_intersections=False, pool=None):
     def are_compatible(word1: str, word2: str, pos1: int, pos2: int):
         if pos1 > pos2:
             pos1, pos2, word1, word2 = pos2, pos1, word2, word1
@@ -12,15 +15,18 @@ def generate_crossing_constraints(words, is_in_hor_mode, is_x_coord, is_y_coord,
             return word1[pos2 - pos1:pos2 - pos1 + overlap_length] == word2[:overlap_length]
         return True
 
+    clause_list = []
+    intersection_vars = [set() for _ in range(len(words))]
+
     for (iw1, w1), (iw2, w2) in combinations(enumerate(words), 2):
         if w1 == w2:
             continue
 
         if is_in_hor_mode[iw1] == is_in_hor_mode[iw2]:
             if is_in_hor_mode[iw1]:
-                common_coord, other_coord, allow_overlap = is_y_coord, is_x_coord, allow_horizontal_word_overlap
+                common_coord, other_coord, allow_overlap = is_y_coord, is_x_coord, allow_horizontal_overlaps
             else:
-                common_coord, other_coord, allow_overlap = is_x_coord, is_y_coord, allow_vertical_word_overlap
+                common_coord, other_coord, allow_overlap = is_x_coord, is_y_coord, allow_vertical_overlaps
 
             for cc in range(min(len(common_coord[iw1]), len(common_coord[iw2]))):
                 vcc1, vcc2 = common_coord[iw1][cc], common_coord[iw2][cc]
@@ -28,7 +34,7 @@ def generate_crossing_constraints(words, is_in_hor_mode, is_x_coord, is_y_coord,
                     for oc2 in range(max(0, oc1 - len(w2) + 1), min(len(other_coord[iw2]), oc1 + len(w1))):
                         voc2 = other_coord[iw2][oc2]
                         if not (allow_overlap and are_compatible(w1, w2, oc1, oc2)):
-                            yield [-vcc1, -vcc2, -voc1, -voc2]
+                            clause_list.append([-vcc1, -vcc2, -voc1, -voc2])
             continue
 
         if not is_in_hor_mode[iw1]:
@@ -38,7 +44,19 @@ def generate_crossing_constraints(words, is_in_hor_mode, is_x_coord, is_y_coord,
                 vx2 = is_x_coord[iw2][x2]
                 for y2 in range(max(0, y1 - len(w2) + 1), min(y1 + 1, len(is_y_coord[iw2]))):
                     if w1[x2 - x1] != w2[y1 - y2]:
-                        yield [-vx1, -vy1, -vx2, -is_y_coord[iw2][y2]]
+                        clause_list.append([-vx1, -vy1, -vx2, -is_y_coord[iw2][y2]])
+                    elif register_intersections:
+                        new_var = pool.id()
+                        clause_list.extend([
+                            [new_var, -vx1, -vy1, -vx2, -is_y_coord[iw2][y2]],
+                            [-new_var, vx1],
+                            [-new_var, vy1],
+                            [-new_var, vx2],
+                            [-new_var, is_y_coord[iw2][y2]]
+                        ])
+                        intersection_vars[iw1].add(new_var)
+                        intersection_vars[iw2].add(new_var)
+    return clause_list, intersection_vars
 
 
 def ensure_nonempty_first_row_and_column(is_x_coord, is_y_coord):
@@ -50,8 +68,12 @@ def ensure_nonempty_first_row_and_column(is_x_coord, is_y_coord):
 
 def ensure_exactly_one_word_placement(words, is_in_hor_mode, is_x_coord, is_y_coord, is_placed):
     for iw in range(len(words)):
-        yield [-is_placed[iw]] + is_x_coord[iw]
-        yield [-is_placed[iw]] + is_y_coord[iw]
+        for varlist in (is_x_coord[iw], is_y_coord[iw]):
+            yield [-is_placed[iw]] + varlist
+            for var in varlist:
+                yield [is_placed[iw], -var]
+            for var1, var2 in combinations(varlist, 2):
+                yield [-var1, -var2]
 
     for (iw1, w1), (iw2, w2) in combinations(enumerate(words), 2):
         if w1 == w2 and is_in_hor_mode[iw1] != is_in_hor_mode[iw2]:
@@ -70,6 +92,7 @@ def forbid_cells(words, is_in_hor_mode, is_x_coord, is_y_coord, forbidden_cells)
 
 
 def make_problem(words, x_bound, y_bound):
+    n_words = len(words)
     is_in_hor_mode = [True] * len(words) + [False] * len(words)
     words = words + words
 
@@ -78,23 +101,31 @@ def make_problem(words, x_bound, y_bound):
 
     clauses = []
 
-    counter = count(1)
+    id_pool = IDPool()
     is_placed = []
     for iw in range(len(words)):
-        is_placed.append(next(counter))
+        is_placed.append(id_pool.id())
     for iw, w in enumerate(words):
         for x in range(x_bound + ((1 - len(w)) if is_in_hor_mode[iw] else 0)):
-            is_x_coord[iw].append(next(counter))
+            is_x_coord[iw].append(id_pool.id())
         for y in range(y_bound + ((1 - len(w)) if not is_in_hor_mode[iw] else 0)):
-            is_y_coord[iw].append(next(counter))
+            is_y_coord[iw].append(id_pool.id())
 
-    clauses.extend(generate_crossing_constraints(words, is_in_hor_mode, is_x_coord, is_y_coord, True, True))
+    # for constraint, bound in [(card.CardEnc.atleast, n_words // 3), (card.CardEnc.atmost, n_words // 2)]:
+    #     clauses.extend(constraint(lits=is_placed[:n_words], bound=bound, encoding=card.EncType.seqcounter, vpool=id_pool).clauses)
+
+    clause_list, intersection_vars = generate_crossing_constraints(words, is_in_hor_mode, is_x_coord, is_y_coord, True, True, True, id_pool)
+    clauses.extend(clause_list)
+    for i, lits in enumerate(intersection_vars):
+        clauses.append(list(lits) + [-is_placed[i]])
+
     clauses.extend(ensure_nonempty_first_row_and_column(is_x_coord, is_y_coord))
+
     clauses.extend(ensure_exactly_one_word_placement(words, is_in_hor_mode, is_x_coord, is_y_coord, is_placed))
     # clauses.extend(forbid_cells(words, is_in_hor_mode, is_x_coord, is_y_coord, [(3, 8), (6, 8), (2, 6)]))
-    clauses = list(set(map(tuple, map(sorted, clauses))))
-    clauses.sort()
-    return clauses, words, is_in_hor_mode, is_placed, is_x_coord, is_y_coord
+
+
+    return sorted(set(map(tuple, map(sorted, clauses)))), words, is_in_hor_mode, is_placed, is_x_coord, is_y_coord
 
 
 def solve_problem(clauses, words, is_in_hor_mode, is_placed, is_x_coord, is_y_coord):
@@ -165,34 +196,36 @@ def main():
 if __name__ == '__main__':
     main()
 
-# Solving took  44.281376 s using MergeSat3
-# Solution:
-# f m b u r g e r p s
-# r i s a l a d i a p
-# u l o b o w l c s o
-# i k d p l a t e t o
-# t t a s t e b e a n
-# c o r n f e a s t j
-# h a y m e n u f a u
-# e s p i z z a o b i
-# f t g l a s s r l c
-# s u s h i c a k e e
-#
-
 
 # Solving took  182.722628 s
 # Solution:
-# r a b b i t i g e r o
-# b p e n g u i n l k c
-# u d g i r a f f e a t
-# t o d w e o i z p n o
-# t l u h a w s e h g p
-# e p c a g l h b a a u
-# r h k l l i a r n r s
-# f i b e e o r a t o w
-# l n e m o n k e y o a
-# y b a t u r t l e · n
-# p a r r o t f r o g t
+# z e b r a d u c k w m
+# p f o c t o p u s h o
+# e r a b b i t s w a n
+# n o f i s h a r k l k
+# g g p a r r o t b e e
+# u l b u t t e r f l y
+# i i e l e p h a n t e
+# n o a d o l p h i n a
+# b n r g i r a f f e g
+# a k a n g a r o o w l
+# t i g e r t u r t l e
+
+# b m o n k e y · · b a t
+# u · w s p · t i g e r d
+# t d l w e f r o g a t u
+# t o p a n t a · · r u c
+# e l a n g · t s h a r k
+# r p r · u z e b r a t a
+# f h r g i r a f f e l n
+# l i o n n · g · · · e g
+# y n t w h a l e · f · a
+# r a b b i t e · · i · r
+# · · e o c t o p u s · o
+# e l e p h a n t · h · o
+
+
+# print("[" + ",\n".join("[" + ", ".join(f"'{c}'" for c in line.split()) + "]" for line in s.splitlines()) + "]")
 
 # [
 #     {"word": "elephant", "hint": "A very large animal with grey skin, big ears that look like fans, and a long trunk."},
