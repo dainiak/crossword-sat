@@ -2,11 +2,31 @@ from pysat.solvers import Mergesat3
 import pysat.card as card
 from pysat.formula import IDPool
 
-from itertools import combinations, product, count
+from itertools import combinations, product
 from datetime import datetime
+from enum import Enum
+from typing import Iterable
 
 
-def generate_crossing_constraints(words, is_in_hor_mode, is_x_coord, is_y_coord, allow_horizontal_overlaps, allow_vertical_overlaps, register_intersections=False, pool=None):
+class IntersectionType(Enum):
+    CROSSING = 0
+    HORIZONTAL_OVERLAP = 1
+    VERTICAL_OVERLAP = 2
+
+
+def generate_crossing_constraints(
+        words, is_in_hor_mode, is_x_coord, is_y_coord,
+        allowed_intersections: Iterable[IntersectionType] = None,
+        register_intersections: bool = False,
+        vpool: IDPool = None):
+    if register_intersections and vpool is None:
+        raise ValueError("vpool must be provided if register_intersections is True")
+    if allowed_intersections is None:
+        allowed_intersections = set()
+    allow_horizontal_overlaps = IntersectionType.HORIZONTAL_OVERLAP in allowed_intersections
+    allow_vertical_overlaps = IntersectionType.VERTICAL_OVERLAP in allowed_intersections
+    allow_crossings = IntersectionType.CROSSING in allowed_intersections
+
     def are_compatible(word1: str, word2: str, pos1: int, pos2: int):
         if pos1 > pos2:
             pos1, pos2, word1, word2 = pos2, pos1, word2, word1
@@ -16,7 +36,7 @@ def generate_crossing_constraints(words, is_in_hor_mode, is_x_coord, is_y_coord,
         return True
 
     clause_list = []
-    intersection_vars = [set() for _ in range(len(words))]
+    intersections_per_word = [[] for _ in words]
 
     for (iw1, w1), (iw2, w2) in combinations(enumerate(words), 2):
         if w1 == w2:
@@ -35,6 +55,14 @@ def generate_crossing_constraints(words, is_in_hor_mode, is_x_coord, is_y_coord,
                         voc2 = other_coord[iw2][oc2]
                         if not (allow_overlap and are_compatible(w1, w2, oc1, oc2)):
                             clause_list.append([-vcc1, -vcc2, -voc1, -voc2])
+                        elif register_intersections:
+                            new_var = vpool.id()
+                            clause_list.extend([
+                                [new_var, -vcc1, -vcc2, -voc1, -voc2],
+                                [-new_var, vcc1], [-new_var, vcc2], [-new_var, voc1], [-new_var, voc2]
+                            ])
+                            intersections_per_word[iw1].append(new_var)
+                            intersections_per_word[iw2].append(new_var)
             continue
 
         if not is_in_hor_mode[iw1]:
@@ -43,20 +71,17 @@ def generate_crossing_constraints(words, is_in_hor_mode, is_x_coord, is_y_coord,
             for x2 in range(x1, x1 + len(w1)):
                 vx2 = is_x_coord[iw2][x2]
                 for y2 in range(max(0, y1 - len(w2) + 1), min(y1 + 1, len(is_y_coord[iw2]))):
-                    if w1[x2 - x1] != w2[y1 - y2]:
+                    if not (allow_crossings and w1[x2 - x1] == w2[y1 - y2]):
                         clause_list.append([-vx1, -vy1, -vx2, -is_y_coord[iw2][y2]])
                     elif register_intersections:
-                        new_var = pool.id()
+                        new_var = vpool.id()
                         clause_list.extend([
                             [new_var, -vx1, -vy1, -vx2, -is_y_coord[iw2][y2]],
-                            [-new_var, vx1],
-                            [-new_var, vy1],
-                            [-new_var, vx2],
-                            [-new_var, is_y_coord[iw2][y2]]
+                            [-new_var, vx1], [-new_var, vy1], [-new_var, vx2], [-new_var, is_y_coord[iw2][y2]]
                         ])
-                        intersection_vars[iw1].add(new_var)
-                        intersection_vars[iw2].add(new_var)
-    return clause_list, intersection_vars
+                        intersections_per_word[iw1].append(new_var)
+                        intersections_per_word[iw2].append(new_var)
+    return clause_list, intersections_per_word
 
 
 def ensure_nonempty_first_row_and_column(is_x_coord, is_y_coord):
@@ -114,10 +139,26 @@ def make_problem(words, x_bound, y_bound):
     # for constraint, bound in [(card.CardEnc.atleast, n_words // 3), (card.CardEnc.atmost, n_words // 2)]:
     #     clauses.extend(constraint(lits=is_placed[:n_words], bound=bound, encoding=card.EncType.seqcounter, vpool=id_pool).clauses)
 
-    clause_list, intersection_vars = generate_crossing_constraints(words, is_in_hor_mode, is_x_coord, is_y_coord, True, True, True, id_pool)
+    clause_list, intersection_vars = generate_crossing_constraints(
+        words, is_in_hor_mode, is_x_coord, is_y_coord,
+        allowed_intersections=[IntersectionType.CROSSING, IntersectionType.HORIZONTAL_OVERLAP, IntersectionType.VERTICAL_OVERLAP],
+        register_intersections=True,
+        vpool=id_pool
+    )
     clauses.extend(clause_list)
     for i, lits in enumerate(intersection_vars):
         clauses.append(list(lits) + [-is_placed[i]])
+    new_vars = [id_pool.id() for _ in words]
+    for i, lits in enumerate(intersection_vars):
+        clauses.extend(
+            clause + [-new_vars[i]]
+            for clause in
+            card.CardEnc.atleast(lits=lits, bound=2, encoding=card.EncType.seqcounter, vpool=id_pool).clauses
+        )
+    clauses.extend(
+        card.CardEnc.atleast(lits=new_vars, bound=5, encoding=card.EncType.seqcounter, vpool=id_pool).clauses
+    )
+
 
     clauses.extend(ensure_nonempty_first_row_and_column(is_x_coord, is_y_coord))
 
@@ -125,7 +166,7 @@ def make_problem(words, x_bound, y_bound):
     # clauses.extend(forbid_cells(words, is_in_hor_mode, is_x_coord, is_y_coord, [(3, 8), (6, 8), (2, 6)]))
 
 
-    return sorted(set(map(tuple, map(sorted, clauses)))), words, is_in_hor_mode, is_placed, is_x_coord, is_y_coord
+    return list(set(map(tuple, map(sorted, clauses)))), words, is_in_hor_mode, is_placed, is_x_coord, is_y_coord
 
 
 def solve_problem(clauses, words, is_in_hor_mode, is_placed, is_x_coord, is_y_coord):
@@ -166,18 +207,18 @@ def print_solution(placement_data, x_bound, y_bound):
 
 
 def main():
-    words = [
-        "pizza", "cake", "juice", "soda", "burger", "salad", "toast", "fruit", "sushi", "pasta", "milk",
-        "corn", "rice", "bean", "chef", "menu", "fork", "spoon", "plate", "bowl", "feast", "taste", "table", "glass"
-    ]
+    # words = [
+    #     "pizza", "cake", "juice", "soda", "burger", "salad", "toast", "fruit", "sushi", "pasta", "milk",
+    #     "corn", "rice", "bean", "chef", "menu", "fork", "spoon", "plate", "bowl", "feast", "taste", "table", "glass"
+    # ]
 
     words = [
-        "elephant","giraffe","tiger","zebra","kangaroo","penguin","lion","monkey","bear","rabbit","ant","rat","bee",
-        "turtle","frog","duck","fish","shark","whale","dolphin","octopus","butterfly","swan","eagle","owl","parrot","bat"
+        "elephant", "giraffe", "tiger", "zebra", "kangaroo", "penguin", "lion", "monkey", "bear", "rabbit", "ant", "rat", "bee",
+        "turtle", "frog", "duck", "fish", "shark", "whale", "dolphin", "octopus", "butterfly", "swan", "eagle", "owl", "parrot", "bat"
     ]
 
-    x_bound = 11
-    y_bound = 11
+    x_bound = 16
+    y_bound = 16
 
     stage_1_start = datetime.now()
     print("Generating clauses...")
