@@ -21,6 +21,17 @@
             font-size: 20px;
             padding: 0;
             box-sizing: border-box;
+            position: relative;
+            overflow: visible;
+        }
+
+        td div {
+            position: absolute;
+            width: 28px;
+            height: 28px;
+            top: 0;
+            left: 0;
+            overflow: visible;
         }
 
         .hint {
@@ -31,9 +42,39 @@
         .highlight {
             background-color: #ffdd59;
         }
+
+        .cell-number {
+            position: absolute;
+            top: -3px;
+            left: 1px;
+            height: 15px;
+            width: 20px;
+            font-size: 12px;
+            overflow: visible;
+            vertical-align: top;
+            text-align: left;
+            margin: 0;
+            padding: 0;
+            color: #333;
+            font-family:   Arial, sans-serif;
+        }
+
+        .cell-arrow {
+            position: absolute;
+        }
+
+        .left-to-right-arrow {
+            transform: scale(1.2) translate(-35%, -12%);
+        }
+
+        .top-to-bottom-arrow {
+            transform: scale(1.2) translate(-95%,30%);
+        }
+
     </style>
 </head>
 <body>
+
 <div class="container mt-3">
     <div class="row">
         <div class="col">
@@ -49,19 +90,10 @@
 
 <link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet" />
 <script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
+<script src="output/output.js"></script>
 
 <script>
-    // Example matrix data
-    let matrix = [['f', 'm', 'b', 'u', 'r', 'g', 'e', 'r', 'p', 's'],
-        ['r', 'i', 's', 'a', 'l', 'a', 'd', 'i', 'a', 'p'],
-        ['u', 'l', 'o', 'b', 'o', 'w', 'l', 'c', 's', 'o'],
-        ['i', 'k', 'd', 'p', 'l', 'a', 't', 'e', 't', 'o'],
-        ['t', 't', 'a', 's', 't', 'e', 'b', 'e', 'a', 'n'],
-        ['c', 'o', 'r', 'n', 'f', 'e', 'a', 's', 't', 'j'],
-        ['h', 'a', 'y', 'm', 'e', 'n', 'u', 'f', 'a', 'u'],
-        ['e', 's', 'p', 'i', 'z', 'z', 'a', 'o', 'b', 'i'],
-        ['f', 't', 'g', 'l', 'a', 's', 's', 'r', 'l', 'c'],
-        ['s', 'u', 's', 'h', 'i', 'c', 'a', 'k', 'e', 'e']];
+
 
     let hints = [{
             "word": "pizza",
@@ -114,6 +146,37 @@
         }]
     ;
 
+    let matrix = [];
+    let x_bound = 20;
+    let y_bound = 20;
+    for(let i = 0; i < y_bound; i++) {
+        matrix.push(new Array(x_bound));
+    }
+
+    for(let i = 0; i < y_bound; i++)
+        for(let j = 0; j < x_bound; j++)
+            matrix[i][j] = '';
+
+    placement_data.forEach((placement) => {
+        let x = placement.x;
+        let y = placement.y;
+        let word = placement.word;
+        for(let i = 0; i < word.length; i++) {
+            matrix[y][x] = word[i];
+            if(placement.horizontal) {
+                x++;
+            } else {
+                y++;
+            }
+        }
+    });
+
+    let td_inner_html = "<div><div class=\"cell-number\">10</div>" +
+        "<svg class=\"cell-arrow left-to-right-arrow\" xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 20 20\">\n" +
+        "<path d=\"M0,10 L15,10 M10,5 L15,10 L10,15\" /></svg>" +
+        "<svg class=\"cell-arrow top-to-bottom-arrow\" xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 20 20\">\n" +
+        "<path d=\"M10,0 L10,15 M5,10 L10,15 L15,10\" /></svg></div>";
+
     function generateTable(matrix) {
         const tableBody = document.getElementById('matrix-table');
         tableBody.innerHTML = '';
@@ -123,7 +186,8 @@
             row.forEach((cell, cellIndex) => {
                 let td = document.createElement('td');
                 td.classList.add('custom-td');
-                td.textContent = cell.toUpperCase();
+                td.innerHTML = td_inner_html + cell.toUpperCase();
+                // td.textContent = cell.toUpperCase();
                 td.dataset.row = rowIndex;
                 td.dataset.col = cellIndex;
                 tr.appendChild(td);

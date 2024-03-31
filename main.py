@@ -1,7 +1,10 @@
+import json
 from datetime import datetime
 from enum import Enum
 from itertools import combinations, product
 from typing import Iterable
+
+from pathlib import Path
 
 import pysat.card as PysatCard
 from pysat.formula import IDPool
@@ -219,8 +222,8 @@ def main():
         "turtle", "frog", "duck", "fish", "shark", "whale", "dolphin", "octopus", "butterfly", "swan", "eagle", "owl", "parrot", "bat"
     ]
 
-    x_bound = 16
-    y_bound = 16
+    x_bound = 20
+    y_bound = 20
 
     stage_1_start = datetime.now()
     print("Generating clauses...")
@@ -234,6 +237,7 @@ def main():
     print("Solving took ", (stage_3_start - stage_2_start).total_seconds(), "s")
     print("Solution:")
     print_solution(placement_data, x_bound, y_bound)
+    Path("output/output.js").write_text(json.dumps(placement_data))
 
 
 if __name__ == '__main__':
