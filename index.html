@@ -70,7 +70,6 @@
         .top-to-bottom-arrow {
             transform: scale(1.2) translate(-95%,30%);
         }
-
     </style>
 </head>
 <body>
@@ -83,7 +82,12 @@
             </table>
         </div>
         <div class="col">
-            <div id="hints"></div>
+            <div id="hints">
+                <p>Down:</p>
+                <ol id="hintsDown"></ol>
+                <p>Across:</p>
+                <ol id="hintsAcross"></ol>
+            </div>
         </div>
     </div>
 </div>
@@ -93,62 +97,9 @@
 <script src="output/output.js"></script>
 
 <script>
-
-
-    let hints = [{
-            "word": "pizza",
-            "hint": "A round food with bread at the bottom. It has sauce, cheese, and things like meat or veggies on top."
-        }, {
-            "word": "cake",
-            "hint": "A sweet food that is often for birthdays. It can have creamy layers and fun decorations."
-        }, {"word": "juice", "hint": "A drink made from squeezing fruits or vegetables."}, {
-            "word": "soda",
-            "hint": "A sweet drink with bubbles. It comes in many tastes like cola or lemon."
-        }, {
-            "word": "burger",
-            "hint": "A meat between two pieces of bread. It can also have salad and cheese."
-        }, {"word": "salad", "hint": "Different raw veggies mixed together, often with a special sauce."}, {
-            "word": "toast",
-            "hint": "Bread made brown and crispy by heating. It's yummy with butter or sweet spread."
-        }, {
-            "word": "fruit",
-            "hint": "Sweet parts of plants that we can eat without cooking."
-        }, {
-            "word": "sushi",
-            "hint": "A food from Japan with special rice, seafood, and sometimes veggies, wrapped in seaweed."
-        }, {
-            "word": "pasta",
-            "hint": "Food made from flour and water, shaped in many ways like long strings or tubes."
-        }, {
-            "word": "milk",
-            "hint": "A white drink from animals like cows or goats. It's good for your bones."
-        }, {
-            "word": "corn",
-            "hint": "A yellow food that grows in the field. It can be eaten whole or popped."
-        }, {"word": "rice", "hint": "Tiny white or brown pieces that we cook and eat with other foods."}, {
-            "word": "bean",
-            "hint": "Small seeds that can be many colors. We cook and eat them."
-        }, {"word": "chef", "hint": "Someone who cooks food in a restaurant."}, {
-            "word": "menu",
-            "hint": "A list of all the foods and drinks you can choose to eat at a restaurant."
-        }, {"word": "fork", "hint": "A tool with sharp points we use to pick up and eat our food."}, {
-            "word": "spoon",
-            "hint": "A tool with a round part used to eat or serve foods that are liquid or soft."
-        }, {"word": "plate", "hint": "A flat piece we put our food on to eat."}, {
-            "word": "bowl",
-            "hint": "A deep dish for holding foods or liquids."
-        }, {"word": "feast", "hint": "A very big meal with lots of different foods, for celebrating."}, {
-            "word": "taste",
-            "hint": "How food or drink feels in your mouth."
-        }, {"word": "table", "hint": "Furniture with a flat top where we eat or work."}, {
-            "word": "glass",
-            "hint": "A clear thing we drink out of."
-        }]
-    ;
-
-    let matrix = [];
-    let x_bound = 20;
-    let y_bound = 20;
+    const matrix = [];
+    const x_bound = 20;
+    const y_bound = 20;
     for(let i = 0; i < y_bound; i++) {
         matrix.push(new Array(x_bound));
     }
@@ -156,6 +107,12 @@
     for(let i = 0; i < y_bound; i++)
         for(let j = 0; j < x_bound; j++)
             matrix[i][j] = '';
+
+    const across = new Map();
+    const down = new Map();
+    const cellNumbers = new Map();
+
+    let counter = 0;
 
     placement_data.forEach((placement) => {
         let x = placement.x;
@@ -169,13 +126,13 @@
                 y++;
             }
         }
-    });
 
-    let td_inner_html = "<div><div class=\"cell-number\">10</div>" +
-        "<svg class=\"cell-arrow left-to-right-arrow\" xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 20 20\">\n" +
-        "<path d=\"M0,10 L15,10 M10,5 L15,10 L10,15\" /></svg>" +
-        "<svg class=\"cell-arrow top-to-bottom-arrow\" xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 20 20\">\n" +
-        "<path d=\"M10,0 L10,15 M5,10 L10,15 L15,10\" /></svg></div>";
+        const cellKey = `${placement.x},${placement.y}`;
+        if(!cellNumbers.has(cellKey))
+            cellNumbers.set(cellKey, ++counter);
+        placement.cellNumber = cellNumbers.get(cellKey);
+        (placement.horizontal ? across : down).set(cellKey, placement);
+    });
 
     function generateTable(matrix) {
         const tableBody = document.getElementById('matrix-table');
@@ -186,8 +143,25 @@
             row.forEach((cell, cellIndex) => {
                 let td = document.createElement('td');
                 td.classList.add('custom-td');
-                td.innerHTML = td_inner_html + cell.toUpperCase();
-                // td.textContent = cell.toUpperCase();
+
+                let tdDiv = document.createElement('div');
+                let leftToRightArrowHTML = "<svg class=\"cell-arrow left-to-right-arrow\" xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 20 20\">\n" +
+                    "<path d=\"M0,10 L15,10 M10,5 L15,10 L10,15\" /></svg>";
+                let topToBottomArrowHTML = "<svg class=\"cell-arrow top-to-bottom-arrow\" xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 20 20\">\n" +
+                    "<path d=\"M10,0 L10,15 M5,10 L10,15 L15,10\" /></svg>";
+
+                let cellNumber = cellNumbers.get(`${cellIndex},${rowIndex}`);
+                if(cellNumber) {
+                    tdDiv.innerHTML += "<div class=\"cell-number\">" + cellNumber + "</div>";
+                }
+                if(across.has(`${cellIndex},${rowIndex}`)) {
+                    tdDiv.innerHTML += leftToRightArrowHTML;
+                }
+                if(down.has(`${cellIndex},${rowIndex}`)) {
+                    tdDiv.innerHTML += topToBottomArrowHTML;
+                }
+                tdDiv.appendChild(document.createTextNode(cell));
+                td.appendChild(tdDiv);
                 td.dataset.row = rowIndex;
                 td.dataset.col = cellIndex;
                 tr.appendChild(td);
@@ -196,62 +170,48 @@
         });
     }
 
-    function displayHints(hints) {
-        const hintsDiv = document.getElementById('hints');
-        hintsDiv.innerHTML = '';
+    function displayHints() {
+        const hintsAcross = document.getElementById('hintsAcross');
+        const hintsDown = document.getElementById('hintsDown');
+        console.log(cellNumbers);
 
-        hints.forEach((hintObj) => {
-            let p = document.createElement('p');
-            p.textContent = hintObj.hint;
-            p.classList.add('hint');
-            p.dataset.word = hintObj.word;
-            p.onclick = function () {
-                highlightWord(this.dataset.word);
+        placement_data.forEach((placement, placementIndex) => {
+            let li = document.createElement('li');
+            const placementKey = `${placement.x},${placement.y}`;
+            li.value = cellNumbers.get(placementKey);
+            console.log(li.value);
+            li.textContent = placement.hint;
+            li.classList.add('hint');
+            const placementToHightlight = placementIndex;
+            li.onclick = function () {
+                highlightWord(placementToHightlight);
             };
-            hintsDiv.appendChild(p);
+            (placement.horizontal ? hintsAcross : hintsDown).appendChild(li);
         });
     }
 
-    function highlightWord(word) {
-        // Reset any previous highlights
+    function highlightWord(placementIndex) {
         document.querySelectorAll('.highlight').forEach(cell => {
             cell.classList.remove('highlight');
         });
 
-        // Logic to find and highlight the word in the table
-        let wordFound = false;
-        matrix.forEach((row, rowIndex) => {
-            let joinedRow = row.join('');
-            let startIndex = joinedRow.indexOf(word);
-            if (startIndex !== -1) {
-                wordFound = true;
-                for (let i = 0; i < word.length; i++) {
-                    let cell = document.querySelector(`td[data-row="${rowIndex}"][data-col="${startIndex + i}"]`);
-                    cell.classList.add('highlight');
-                }
+        const placement = placement_data[placementIndex];
+        let x = placement.x;
+        let y = placement.y;
+        for (let i = 0; i < placement.word.length; i++) {
+            let cell = document.querySelector(`td[data-row="${y}"][data-col="${x}"]`);
+            if (placement.horizontal) {
+                x++;
+            } else {
+                y++;
             }
-        });
-
-        for (let col = 0; col < matrix[0].length && !wordFound; col++) {
-            let colString = matrix.map(row => row[col]).join('');
-            let startIndex = colString.indexOf(word);
-            if (startIndex !== -1) {
-                for (let row = startIndex; row < startIndex + word.length; row++) {
-                    let cell = document.querySelector(`td[data-row="${row}"][data-col="${col}"]`);
-                    cell.classList.add('highlight');
-                }
-                wordFound = true;
-            }
-        }
-
-        if (!wordFound) {
-            alert('Word not found in the matrix!');
+            cell.classList.add('highlight');
         }
     }
 
     document.addEventListener('DOMContentLoaded', function () {
         generateTable(matrix);
-        displayHints(hints);
+        displayHints();
     });
 </script>
 </body>
