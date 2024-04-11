@@ -39,36 +39,35 @@
             user-select: none;
         }
 
-        .highlight {
+        .occupied {
+            background-color: #f0f0f0;
+        }
+
+        .highlight, .highlight.occupied {
             background-color: #ffdd59;
         }
 
-        .cell-number {
+        div.cell-number {
             position: absolute;
             top: -3px;
             left: 1px;
             height: 15px;
             width: 20px;
             font-size: 12px;
+            font-family:   Arial, sans-serif;
             overflow: visible;
             vertical-align: top;
             text-align: left;
             margin: 0;
             padding: 0;
             color: #333;
-            font-family:   Arial, sans-serif;
         }
 
-        .cell-arrow {
+        div.top-to-bottom-arrow {
             position: absolute;
-        }
-
-        .left-to-right-arrow {
-            transform: scale(1.2) translate(-35%, -12%);
-        }
-
-        .top-to-bottom-arrow {
-            transform: scale(1.2) translate(-95%,30%);
+            transform: translate(-14px, 2px) rotate(90deg) ;
+            font-size: 12px;
+            font-family:   Arial, sans-serif;
         }
     </style>
 </head>
@@ -83,10 +82,10 @@
         </div>
         <div class="col">
             <div id="hints">
-                <p>Down:</p>
-                <ol id="hintsDown"></ol>
                 <p>Across:</p>
                 <ol id="hintsAcross"></ol>
+                <p>Down:</p>
+                <ol id="hintsDown"></ol>
             </div>
         </div>
     </div>
@@ -97,34 +96,39 @@
 <script src="output/output.js"></script>
 
 <script>
-    const matrix = [];
-    const x_bound = 20;
-    const y_bound = 20;
-    for(let i = 0; i < y_bound; i++) {
-        matrix.push(new Array(x_bound));
-    }
+    let x_bound = 0;
+    let y_bound = 0;
 
-    for(let i = 0; i < y_bound; i++)
+    placement_data.forEach((placement) => {
+        if(placement.horizontal){
+            x_bound = Math.max(x_bound, placement.x + placement.word.length);
+            y_bound = Math.max(y_bound, placement.y + 1);
+        } else {
+            x_bound = Math.max(x_bound, placement.x + 1);
+            y_bound = Math.max(y_bound, placement.y + placement.word.length);
+        }
+    });
+
+    const matrix = [];
+    for(let i = 0; i < y_bound; i++){
+        matrix.push(new Array(x_bound));
         for(let j = 0; j < x_bound; j++)
             matrix[i][j] = '';
+    }
 
     const across = new Map();
     const down = new Map();
     const cellNumbers = new Map();
-
     let counter = 0;
 
     placement_data.forEach((placement) => {
-        let x = placement.x;
-        let y = placement.y;
-        let word = placement.word;
-        for(let i = 0; i < word.length; i++) {
+        const word = placement.word;
+        for(let i = 0, x = placement.x, y = placement.y; i < word.length; i++) {
             matrix[y][x] = word[i];
-            if(placement.horizontal) {
+            if(placement.horizontal)
                 x++;
-            } else {
+            else
                 y++;
-            }
         }
 
         const cellKey = `${placement.x},${placement.y}`;
@@ -133,6 +137,8 @@
         placement.cellNumber = cellNumbers.get(cellKey);
         (placement.horizontal ? across : down).set(cellKey, placement);
     });
+
+    placement_data.sort((a, b) => a.cellNumber - b.cellNumber);
 
     function generateTable(matrix) {
         const tableBody = document.getElementById('matrix-table');
@@ -145,22 +151,19 @@
                 td.classList.add('custom-td');
 
                 let tdDiv = document.createElement('div');
-                let leftToRightArrowHTML = "<svg class=\"cell-arrow left-to-right-arrow\" xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 20 20\">\n" +
-                    "<path d=\"M0,10 L15,10 M10,5 L15,10 L10,15\" /></svg>";
-                let topToBottomArrowHTML = "<svg class=\"cell-arrow top-to-bottom-arrow\" xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 20 20\">\n" +
-                    "<path d=\"M10,0 L10,15 M5,10 L10,15 L15,10\" /></svg>";
+                let topToBottomArrowHTML = '<div class="top-to-bottom-arrow">▶</div>';
 
                 let cellNumber = cellNumbers.get(`${cellIndex},${rowIndex}`);
                 if(cellNumber) {
-                    tdDiv.innerHTML += "<div class=\"cell-number\">" + cellNumber + "</div>";
-                }
-                if(across.has(`${cellIndex},${rowIndex}`)) {
-                    tdDiv.innerHTML += leftToRightArrowHTML;
+                    tdDiv.innerHTML += '<div class="cell-number">' + cellNumber + (across.has(`${cellIndex},${rowIndex}`) ? '▶' : '') + '</div>';
                 }
                 if(down.has(`${cellIndex},${rowIndex}`)) {
                     tdDiv.innerHTML += topToBottomArrowHTML;
                 }
-                tdDiv.appendChild(document.createTextNode(cell));
+                // tdDiv.appendChild(document.createTextNode(cell));
+                if(cell) {
+                    td.classList.add('occupied');
+                }
                 td.appendChild(tdDiv);
                 td.dataset.row = rowIndex;
                 td.dataset.col = cellIndex;
@@ -173,13 +176,11 @@
     function displayHints() {
         const hintsAcross = document.getElementById('hintsAcross');
         const hintsDown = document.getElementById('hintsDown');
-        console.log(cellNumbers);
 
         placement_data.forEach((placement, placementIndex) => {
             let li = document.createElement('li');
             const placementKey = `${placement.x},${placement.y}`;
             li.value = cellNumbers.get(placementKey);
-            console.log(li.value);
             li.textContent = placement.hint;
             li.classList.add('hint');
             const placementToHightlight = placementIndex;
@@ -196,16 +197,13 @@
         });
 
         const placement = placement_data[placementIndex];
-        let x = placement.x;
-        let y = placement.y;
-        for (let i = 0; i < placement.word.length; i++) {
-            let cell = document.querySelector(`td[data-row="${y}"][data-col="${x}"]`);
-            if (placement.horizontal) {
+        for (let i = 0, x = placement.x, y = placement.y; i < placement.word.length; i++) {
+            document.querySelector(`td[data-row="${y}"][data-col="${x}"]`).classList.add('highlight');
+
+            if (placement.horizontal)
                 x++;
-            } else {
+            else
                 y++;
-            }
-            cell.classList.add('highlight');
         }
     }
 
