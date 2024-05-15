@@ -6,7 +6,6 @@ from typing import Iterable
 from pydantic import BaseModel
 from math import floor, ceil
 
-
 from pathlib import Path
 
 import pysat.card as PysatCard
@@ -123,7 +122,7 @@ def ensure_exactly_one_word_placement(words, is_in_hor_mode, is_x_coord, is_y_co
             yield [-is_placed[iw1], -is_placed[iw2]]
 
 
-def forbid_cells(words, is_in_hor_mode, is_x_coord, is_y_coord, forbidden_cells):
+def forbid_cells(words, is_in_hor_mode, is_x_coord, is_y_coord, forbidden_cells: list[tuple[int, int]]):
     for (x, y), (iw, w) in product(forbidden_cells, enumerate(words)):
         if is_in_hor_mode[iw]:
             fixed_coord_var, other_coord, other_coord_list = is_y_coord[iw][y], x, is_x_coord[iw]
@@ -135,7 +134,8 @@ def forbid_cells(words, is_in_hor_mode, is_x_coord, is_y_coord, forbidden_cells)
 
 def bound_isolated_component_size(words, intersections_per_word, min_component_size):
     n_unique_words = len(words) // 2
-    intersections_per_word = [set(lits) | set(intersections_per_word[iw + n_unique_words]) for iw, lits in enumerate(intersections_per_word[:n_unique_words])]
+    intersections_per_word = [set(lits) | set(intersections_per_word[iw + n_unique_words]) for iw, lits in
+                              enumerate(intersections_per_word[:n_unique_words])]
 
     pairwise_intersection_vars = [[set() for _ in range(n_unique_words)] for __ in range(n_unique_words)]
     for iw1, iw2 in combinations(range(n_unique_words), 2):
@@ -152,24 +152,36 @@ def bound_isolated_component_size(words, intersections_per_word, min_component_s
             yield clause
 
 
-def forbid_placement(words, is_in_hor_mode, is_x_coord, is_y_coord, is_placed, placement_data: list[WordPlacement]):
+def forbid_placement(words, is_in_hor_mode, is_x_coord, is_y_coord, is_placed,
+                     forbidden_placements: list[WordPlacement]):
     clause = []
     for iw, (w, h) in enumerate(zip(words, is_in_hor_mode)):
-        if word_data := next((data for data in placement_data if data.word == w and data.horizontal == h), None):
+        if word_data := next((data for data in forbidden_placements if data.word == w and data.horizontal == h), None):
             clause.extend([-is_placed[iw], -is_x_coord[iw][word_data.x], -is_y_coord[iw][word_data.y]])
     return clause
+
+
+class IntersectionOptions(BaseModel):
+    intersections_bound: int
+    qty_bound: int
+
+
+class CrosswordOptions(BaseModel):
+    max_skewness: float = None
+    min_isolated_component_size: int = 2
+    min_words_with_many_intersections: IntersectionOptions = None
+    forbidden_cells: list[tuple[int, int]] = []
+    forbidden_placements: list[WordPlacement] = []
 
 
 def make_problem(
         words,
         x_bound,
         y_bound,
-        max_skewness=None,
-        min_isolated_component_size=2,
-        min_words_with_many_intersections=None,
-        forbidden_cells=None,
-        forbidden_placements=None
+        options: CrosswordOptions = None
 ):
+    if options is None:
+        options = CrosswordOptions()
     n_original_words = len(words)
     is_in_hor_mode = [True] * len(words) + [False] * len(words)
     words = words + words
@@ -189,55 +201,56 @@ def make_problem(
         for y in range(y_bound + ((1 - len(w)) if not is_in_hor_mode[iw] else 0)):
             is_y_coord[iw].append(id_pool.id())
 
-    if max_skewness is not None:
-        assert 0. < max_skewness <= 1.
+    if options.max_skewness is not None:
+        assert 0. < options.max_skewness <= 1.
         clauses.extend(PysatCard.CardEnc.atleast(
             lits=is_placed[:n_original_words],
-            bound=floor(n_original_words * (1 - max_skewness) * 0.5),
+            bound=floor(n_original_words * (1 - options.max_skewness) * 0.5),
             encoding=PysatCard.EncType.seqcounter,
             vpool=id_pool).clauses
-        )
+                       )
         clauses.extend(PysatCard.CardEnc.atmost(
             lits=is_placed[:n_original_words],
-            bound=ceil(n_original_words * (1 + max_skewness) * 0.5),
+            bound=ceil(n_original_words * (1 + options.max_skewness) * 0.5),
             encoding=PysatCard.EncType.seqcounter,
             vpool=id_pool).clauses
-        )
+                       )
 
     clause_list, intersection_vars = generate_crossing_constraints(
         words, is_in_hor_mode, is_x_coord, is_y_coord,
-        allowed_intersections=[IntersectionType.CROSSING, IntersectionType.HORIZONTAL_OVERLAP, IntersectionType.VERTICAL_OVERLAP],
+        allowed_intersections=[IntersectionType.CROSSING, IntersectionType.HORIZONTAL_OVERLAP,
+                               IntersectionType.VERTICAL_OVERLAP],
         register_intersections=True,
         vpool=id_pool
     )
     clauses.extend(clause_list)
 
-    if min_isolated_component_size == 2:
+    if options.min_isolated_component_size == 2:
         for i, lits in enumerate(intersection_vars):
             clauses.append(list(lits) + [-is_placed[i]])
-    elif min_isolated_component_size > 2:
-        min_isolated_component_size = min(min_isolated_component_size, (n_original_words + 1) // 2)
+    elif options.min_isolated_component_size > 2:
+        min_isolated_component_size = min(options.min_isolated_component_size, (n_original_words + 1) // 2)
         clauses.extend(bound_isolated_component_size(words, intersection_vars, min_isolated_component_size))
 
-    if min_words_with_many_intersections is not None:
-        intersections_bound, qty_bound = min_words_with_many_intersections
+    if options.min_words_with_many_intersections is not None:
         new_vars = [id_pool.id() for _ in words]
         clauses.extend(
             clause + [-new_vars[iw]]
             for iw, lits in enumerate(intersection_vars)
-            for clause in PysatCard.CardEnc.atleast(lits=lits, bound=intersections_bound, encoding=PysatCard.EncType.seqcounter, vpool=id_pool).clauses
+            for clause in
+            PysatCard.CardEnc.atleast(lits=lits, bound=options.min_words_with_many_intersections.intersections_bound,
+                                      encoding=PysatCard.EncType.seqcounter, vpool=id_pool).clauses
         )
         clauses.extend(
-            PysatCard.CardEnc.atleast(lits=new_vars, bound=qty_bound, encoding=PysatCard.EncType.seqcounter, vpool=id_pool).clauses
+            PysatCard.CardEnc.atleast(lits=new_vars, bound=options.min_words_with_many_intersections.qty_bound,
+                                      encoding=PysatCard.EncType.seqcounter, vpool=id_pool).clauses
         )
 
     clauses.extend(ensure_nonempty_first_row_and_column(is_x_coord, is_y_coord))
     clauses.extend(ensure_exactly_one_word_placement(words, is_in_hor_mode, is_x_coord, is_y_coord, is_placed))
-    if forbidden_cells is not None:
-        clauses.extend(forbid_cells(words, is_in_hor_mode, is_x_coord, is_y_coord, forbidden_cells))
-    if forbidden_placements is not None:
-        for forbidden_placement in forbidden_placements:
-            clauses.extend(forbid_placement(words, is_in_hor_mode, is_x_coord, is_y_coord, is_placed, forbidden_placement))
+    clauses.extend(forbid_cells(words, is_in_hor_mode, is_x_coord, is_y_coord, options.forbidden_cells))
+    clauses.extend(
+        forbid_placement(words, is_in_hor_mode, is_x_coord, is_y_coord, is_placed, options.forbidden_placements))
     print("Sorting and deduplicating...")
     return list(set(map(tuple, map(sorted, clauses)))), words, is_in_hor_mode, is_placed, is_x_coord, is_y_coord
 
@@ -288,6 +301,11 @@ def print_dimacs(clauses):
         f.write("\n".join(" ".join(str(lit) for lit in clause) + " 0" for clause in clauses))
 
 
+def save_solution(placement_data):
+    jsonified = json.dumps([data.dict() for data in placement_data], indent=2)
+    Path("output/output.js").write_text(f"var placement_data = {jsonified};")
+
+
 def main():
     words = [
         "House",
@@ -313,14 +331,13 @@ def main():
     ]
     words = [w.lower() for w in words]
 
-
     # words = [
     #     "elephant", "giraffe", "tiger", "zebra", "kangaroo", "penguin", "lion", "monkey", "bear", "rabbit", "ant", "rat", "bee",
     #     "turtle", "frog", "duck", "fish", "shark", "whale", "dolphin", "octopus", "butterfly", "swan", "eagle", "owl", "parrot", "bat"
     # ]
 
-    x_bound = 13
-    y_bound = 13
+    x_bound = 11
+    y_bound = 11
     # var placement_data = [{"word": "cake", "x": 6, "y": 9, "horizontal": true}, {"word": "soda", "x": 4, "y": 4, "horizontal": true}, {"word": "salad", "x": 1, "y": 7, "horizontal": true}, {"word": "sushi", "x": 4, "y": 3, "horizontal": true}, {"word": "pasta", "x": 1, "y": 9, "horizontal": true}, {"word": "corn", "x": 3, "y": 6, "horizontal": true}, {"word": "bean", "x": 0, "y": 4, "horizontal": true}, {"word": "chef", "x": 5, "y": 0, "horizontal": true}, {"word": "menu", "x": 5, "y": 2, "horizontal": true}, {"word": "plate", "x": 3, "y": 1, "horizontal": true}, {"word": "feast", "x": 0, "y": 5, "horizontal": true}, {"word": "taste", "x": 2, "y": 8, "horizontal": true}, {"word": "table", "x": 5, "y": 5, "horizontal": true}, {"word": "pizza", "x": 2, "y": 0, "horizontal": false}, {"word": "juice", "x": 1, "y": 0, "horizontal": false}, {"word": "burger", "x": 9, "y": 1, "horizontal": false}, {"word": "toast", "x": 4, "y": 5, "horizontal": false}, {"word": "fruit", "x": 8, "y": 0, "horizontal": false}, {"word": "milk", "x": 8, "y": 6, "horizontal": false}, {"word": "rice", "x": 9, "y": 6, "horizontal": false}, {"word": "fork", "x": 0, "y": 5, "horizontal": false}, {"word": "spoon", "x": 3, "y": 0, "horizontal": false}, {"word": "bowl", "x": 7, "y": 5, "horizontal": false}, {"word": "glass", "x": 4, "y": 0, "horizontal": false}];
     # var placement_data = [{"word": "elephant", "x": 1, "y": 11, "horizontal": true}, {"word": "giraffe", "x": 1, "y": 1, "horizontal": true}, {"word": "tiger", "x": 1, "y": 8, "horizontal": true}, {"word": "bear", "x": 1, "y": 9, "horizontal": true}, {"word": "rabbit", "x": 4, "y": 9, "horizontal": true}, {"word": "ant", "x": 6, "y": 11, "horizontal": true}, {"word": "frog", "x": 7, "y": 3, "horizontal": true}, {"word": "duck", "x": 8, "y": 8, "horizontal": true}, {"word": "whale", "x": 1, "y": 4, "horizontal": true}, {"word": "dolphin", "x": 0, "y": 0, "horizontal": true}, {"word": "butterfly", "x": 2, "y": 10, "horizontal": true}, {"word": "eagle", "x": 1, "y": 7, "horizontal": true}, {"word": "parrot", "x": 0, "y": 5, "horizontal": true}, {"word": "bat", "x": 4, "y": 3, "horizontal": true}, {"word": "zebra", "x": 8, "y": 0, "horizontal": false}, {"word": "kangaroo", "x": 10, "y": 0, "horizontal": false}, {"word": "penguin", "x": 0, "y": 5, "horizontal": false}, {"word": "lion", "x": 2, "y": 0, "horizontal": false}, {"word": "monkey", "x": 11, "y": 5, "horizontal": false}, {"word": "rat", "x": 5, "y": 8, "horizontal": false}, {"word": "bee", "x": 1, "y": 9, "horizontal": false}, {"word": "turtle", "x": 6, "y": 3, "horizontal": false}, {"word": "fish", "x": 7, "y": 3, "horizontal": false}, {"word": "shark", "x": 3, "y": 2, "horizontal": false}, {"word": "octopus", "x": 9, "y": 0, "horizontal": false}, {"word": "swan", "x": 1, "y": 3, "horizontal": false}, {"word": "owl", "x": 4, "y": 5, "horizontal": false}];
     # var placement_data = [{"word": "street", "x": 5, "y": 10, "horizontal": true}, {"word": "bus", "x": 3, "y": 10, "horizontal": true}, {"word": "tree", "x": 6, "y": 10, "horizontal": true}, {"word": "garden", "x": 0, "y": 4, "horizontal": true}, {"word": "kitchen", "x": 0, "y": 1, "horizontal": true}, {"word": "bedroom", "x": 3, "y": 6, "horizontal": true}, {"word": "bathroom", "x": 1, "y": 2, "horizontal": true}, {"word": "playground", "x": 0, "y": 0, "horizontal": true}, {"word": "restaurant", "x": 0, "y": 9, "horizontal": true}, {"word": "bridge", "x": 0, "y": 5, "horizontal": true}, {"word": "museum", "x": 1, "y": 8, "horizontal": true}, {"word": "traffic", "x": 0, "y": 3, "horizontal": true}, {"word": "house", "x": 2, "y": 6, "horizontal": false}, {"word": "apartment", "x": 9, "y": 1, "horizontal": false}, {"word": "park", "x": 0, "y": 7, "horizontal": false}, {"word": "school", "x": 7, "y": 3, "horizontal": false}, {"word": "store", "x": 8, "y": 4, "horizontal": false}, {"word": "car", "x": 6, "y": 3, "horizontal": false}, {"word": "library", "x": 1, "y": 0, "horizontal": false}, {"word": "supermarket", "x": 10, "y": 0, "horizontal": false}];
@@ -339,64 +356,8 @@ def main():
     print("Solving took ", (stage_3_start - stage_2_start).total_seconds(), "s")
     print("Solution:")
     print_solution(placement_data, x_bound, y_bound)
-    # Path("output/output.js").write_text("placement_data = " + json.dumps(placement_data) + ";")
+    save_solution(placement_data)
 
 
 if __name__ == '__main__':
     main()
-
-
-# Solving took  182.722628 s
-# Solution:
-# z e b r a d u c k w m
-# p f o c t o p u s h o
-# e r a b b i t s w a n
-# n o f i s h a r k l k
-# g g p a r r o t b e e
-# u l b u t t e r f l y
-# i i e l e p h a n t e
-# n o a d o l p h i n a
-# b n r g i r a f f e g
-# a k a n g a r o o w l
-# t i g e r t u r t l e
-
-# b m o n k e y · · b a t
-# u · w s p · t i g e r d
-# t d l w e f r o g a t u
-# t o p a n t a · · r u c
-# e l a n g · t s h a r k
-# r p r · u z e b r a t a
-# f h r g i r a f f e l n
-# l i o n n · g · · · e g
-# y n t w h a l e · f · a
-# r a b b i t e · · i · r
-# · · e o c t o p u s · o
-# e l e p h a n t · h · o
-
-
-# var placement_data = [
-#   {"word": "pizza", "x": 5, "y": 9, "horizontal": true, "hint": "A round food with tomato sauce, cheese, and toppings you bake."},
-#   {"word": "juice", "x": 5, "y": 1, "horizontal": true, "hint": "A drink made from squeezing fruits."},
-#   {"word": "salad", "x": 4, "y": 7, "horizontal": true, "hint": "A mix of raw vegetables like lettuce, tomatoes, and cucumbers."},
-#   {"word": "toast", "x": 4, "y": 5, "horizontal": true, "hint": "Slices of bread made brown and crispy by heat."},
-#   {"word": "fruit", "x": 4, "y": 0, "horizontal": true, "hint": "Sweet and juicy parts of plants, like apples or bananas."},
-#   {"word": "rice", "x": 3, "y": 2, "horizontal": true, "hint": "Small, white grains from a plant, cooked and eaten."},
-#   {"word": "bean", "x": 5, "y": 8, "horizontal": true, "hint": "Small, edible seeds from certain plants, often cooked or canned."},
-#   {"word": "chef", "x": 1, "y": 0, "horizontal": true, "hint": "A person who cooks professionally in a restaurant."},
-#   {"word": "fork", "x": 1, "y": 4, "horizontal": true, "hint": "A tool with long thin parts used to pick up food."},
-#   {"word": "plate", "x": 3, "y": 3, "horizontal": true, "hint": "A flat dish you put your food on to eat."},
-#   {"word": "bowl", "x": 0, "y": 1, "horizontal": true, "hint": "A round, deep dish used for holding soup or other food."},
-#   {"word": "glass", "x": 0, "y": 7, "horizontal": true, "hint": "A container made of glass you drink from."},
-#   {"word": "cake", "x": 8, "y": 1, "horizontal": false, "hint": "A sweet baked dessert usually made with flour, sugar, and eggs."},
-#   {"word": "soda", "x": 5, "y": 4, "horizontal": false, "hint": "A sweet, fizzy drink with bubbles."},
-#   {"word": "burger", "x": 0, "y": 4, "horizontal": false, "hint": "A cooked patty of meat or vegetables inside a bun."},
-#   {"word": "sushi", "x": 3, "y": 5, "horizontal": false, "hint": "Japanese food of rice with fish, wrapped in seaweed."},
-#   {"word": "pasta", "x": 9, "y": 5, "horizontal": false, "hint": "Italian food made from wheat, shaped into forms like spaghetti and macaroni."},
-#   {"word": "milk", "x": 4, "y": 1, "horizontal": false, "hint": "A white liquid produced by animals like cows and goats for drinking."},
-#   {"word": "corn", "x": 1, "y": 0, "horizontal": false, "hint": "A yellow vegetable that grows in long ears on tall green plants."},
-#   {"word": "menu", "x": 9, "y": 0, "horizontal": false, "hint": "A list of food and drinks you can order at a restaurant."},
-#   {"word": "spoon", "x": 2, "y": 2, "horizontal": false, "hint": "A tool with a round end for eating soup or stirring."},
-#   {"word": "feast", "x": 7, "y": 2, "horizontal": false, "hint": "A big meal with lots of food for many people."},
-#   {"word": "taste", "x": 4, "y": 5, "horizontal": false, "hint": "The flavor of food or drink you feel with your tongue."},
-#   {"word": "table", "x": 6, "y": 4, "horizontal": false, "hint": "Furniture with a flat top for eating meals, writing, or working."}
-# ];
