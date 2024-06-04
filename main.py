@@ -18,6 +18,7 @@ class WordPlacement(BaseModel):
     x: int
     y: int
     horizontal: bool
+    hint: str = ""
 
 
 class IntersectionType(Enum):
@@ -102,8 +103,8 @@ def generate_crossing_constraints(
 
 def ensure_nonempty_first_row_and_column(is_x_coord, is_y_coord):
     return [
-        [var_list[0] for var_list in is_x_coord],
-        [var_list[0] for var_list in is_y_coord]
+        [var_list[0] for var_list in is_x_coord if var_list],
+        [var_list[0] for var_list in is_y_coord if var_list]
     ]
 
 
@@ -174,12 +175,22 @@ class CrosswordOptions(BaseModel):
     forbidden_placements: list[WordPlacement] = []
 
 
+def guaranteed_infeasible(words, x_bound, y_bound):
+    return (
+        x_bound < 1 or y_bound < 1
+        or sum(map(len, words)) > 2 * x_bound * y_bound
+        or any(len(word) > x_bound and len(word) > y_bound for word in words)
+    )
+
+
 def make_problem(
         words,
         x_bound,
         y_bound,
         options: CrosswordOptions = None
 ):
+    if guaranteed_infeasible(words, x_bound, y_bound):
+        return [], [], [], [], [], []
     if options is None:
         options = CrosswordOptions()
     n_original_words = len(words)
@@ -301,35 +312,33 @@ def print_dimacs(clauses):
         f.write("\n".join(" ".join(str(lit) for lit in clause) + " 0" for clause in clauses))
 
 
-def save_solution(placement_data):
+def save_solution(placement_data: list[WordPlacement], words_with_hints: list):
+    placement_data = placement_data.copy()
+    for data in placement_data:
+        data.hint = next(w["hint"] for w in words_with_hints if w["word"] == data.word)
     jsonified = json.dumps([data.dict() for data in placement_data], indent=2)
     Path("output/output.js").write_text(f"var placement_data = {jsonified};")
 
 
 def main():
-    words = [
-        "House",
-        "Apartment",
-        "Park",
-        "School",
-        "Street",
-        "Store",
-        "Bus",
-        "Car",
-        "Tree",
-        "Garden",
-        "Kitchen",
-        "Bedroom",
-        "Bathroom",
-        "Playground",
-        "Library",
-        "Restaurant",
-        "Supermarket",
-        "Bridge",
-        "Museum",
-        "Traffic"
+    words_with_hints = [
+       {"word": "spoon", "hint": "A small tool we use for stirring soup and eating cereal."},
+       {"word": "fork", "hint": "It has three points; we use to pick up food like vegetables or meat."},
+       {"word": "pan", "hint": "We cook pancakes on this round, flat plate with a handle."},
+       {"word": "colander", "hint": "A bowl-shaped thing we use to drain water from pasta."},
+       {"word": "blender", "hint": "It's like a big machine that mixes food into smoothies or soups."},
+       {"word": "oven", "hint": "A place where we bake cookies and cakes to be yummy and hot."},
+       {"word": "spatula", "hint": "This flat tool helps us flip pancakes without breaking them."},
+       {"word": "whisk", "hint": "We use it to mix things like eggs or cream really well."},
+       {"word": "tongs", "hint": "A pair of tools with arms that help us pick up hot food from the stove."},
+       {"word": "mixer", "hint": "It has blades that spin around; we use it for making dough or whipping cream."},
+       {"word": "grater", "hint": "This tool with sharp holes helps us shred cheese into small pieces."},
+       {"word": "ladle", "hint": "It's a big spoon for scooping soup or stew into bowls."},
+       {"word": "peeler", "hint": "A small tool that takes off the skin of fruits and vegetables like apples."},
+       {"word": "scissors", "hint": "We use these to cut paper, but not for food; they're kitchen scissors."},
+       {"word": "thermometer", "hint": "A tool that tells us how hot our cooked meat is before we eat it."},
     ]
-    words = [w.lower() for w in words]
+    words = [w["word"].lower() for w in words_with_hints]
 
     # words = [
     #     "elephant", "giraffe", "tiger", "zebra", "kangaroo", "penguin", "lion", "monkey", "bear", "rabbit", "ant", "rat", "bee",
@@ -337,7 +346,7 @@ def main():
     # ]
 
     x_bound = 11
-    y_bound = 11
+    y_bound = 8
     # var placement_data = [{"word": "cake", "x": 6, "y": 9, "horizontal": true}, {"word": "soda", "x": 4, "y": 4, "horizontal": true}, {"word": "salad", "x": 1, "y": 7, "horizontal": true}, {"word": "sushi", "x": 4, "y": 3, "horizontal": true}, {"word": "pasta", "x": 1, "y": 9, "horizontal": true}, {"word": "corn", "x": 3, "y": 6, "horizontal": true}, {"word": "bean", "x": 0, "y": 4, "horizontal": true}, {"word": "chef", "x": 5, "y": 0, "horizontal": true}, {"word": "menu", "x": 5, "y": 2, "horizontal": true}, {"word": "plate", "x": 3, "y": 1, "horizontal": true}, {"word": "feast", "x": 0, "y": 5, "horizontal": true}, {"word": "taste", "x": 2, "y": 8, "horizontal": true}, {"word": "table", "x": 5, "y": 5, "horizontal": true}, {"word": "pizza", "x": 2, "y": 0, "horizontal": false}, {"word": "juice", "x": 1, "y": 0, "horizontal": false}, {"word": "burger", "x": 9, "y": 1, "horizontal": false}, {"word": "toast", "x": 4, "y": 5, "horizontal": false}, {"word": "fruit", "x": 8, "y": 0, "horizontal": false}, {"word": "milk", "x": 8, "y": 6, "horizontal": false}, {"word": "rice", "x": 9, "y": 6, "horizontal": false}, {"word": "fork", "x": 0, "y": 5, "horizontal": false}, {"word": "spoon", "x": 3, "y": 0, "horizontal": false}, {"word": "bowl", "x": 7, "y": 5, "horizontal": false}, {"word": "glass", "x": 4, "y": 0, "horizontal": false}];
     # var placement_data = [{"word": "elephant", "x": 1, "y": 11, "horizontal": true}, {"word": "giraffe", "x": 1, "y": 1, "horizontal": true}, {"word": "tiger", "x": 1, "y": 8, "horizontal": true}, {"word": "bear", "x": 1, "y": 9, "horizontal": true}, {"word": "rabbit", "x": 4, "y": 9, "horizontal": true}, {"word": "ant", "x": 6, "y": 11, "horizontal": true}, {"word": "frog", "x": 7, "y": 3, "horizontal": true}, {"word": "duck", "x": 8, "y": 8, "horizontal": true}, {"word": "whale", "x": 1, "y": 4, "horizontal": true}, {"word": "dolphin", "x": 0, "y": 0, "horizontal": true}, {"word": "butterfly", "x": 2, "y": 10, "horizontal": true}, {"word": "eagle", "x": 1, "y": 7, "horizontal": true}, {"word": "parrot", "x": 0, "y": 5, "horizontal": true}, {"word": "bat", "x": 4, "y": 3, "horizontal": true}, {"word": "zebra", "x": 8, "y": 0, "horizontal": false}, {"word": "kangaroo", "x": 10, "y": 0, "horizontal": false}, {"word": "penguin", "x": 0, "y": 5, "horizontal": false}, {"word": "lion", "x": 2, "y": 0, "horizontal": false}, {"word": "monkey", "x": 11, "y": 5, "horizontal": false}, {"word": "rat", "x": 5, "y": 8, "horizontal": false}, {"word": "bee", "x": 1, "y": 9, "horizontal": false}, {"word": "turtle", "x": 6, "y": 3, "horizontal": false}, {"word": "fish", "x": 7, "y": 3, "horizontal": false}, {"word": "shark", "x": 3, "y": 2, "horizontal": false}, {"word": "octopus", "x": 9, "y": 0, "horizontal": false}, {"word": "swan", "x": 1, "y": 3, "horizontal": false}, {"word": "owl", "x": 4, "y": 5, "horizontal": false}];
     # var placement_data = [{"word": "street", "x": 5, "y": 10, "horizontal": true}, {"word": "bus", "x": 3, "y": 10, "horizontal": true}, {"word": "tree", "x": 6, "y": 10, "horizontal": true}, {"word": "garden", "x": 0, "y": 4, "horizontal": true}, {"word": "kitchen", "x": 0, "y": 1, "horizontal": true}, {"word": "bedroom", "x": 3, "y": 6, "horizontal": true}, {"word": "bathroom", "x": 1, "y": 2, "horizontal": true}, {"word": "playground", "x": 0, "y": 0, "horizontal": true}, {"word": "restaurant", "x": 0, "y": 9, "horizontal": true}, {"word": "bridge", "x": 0, "y": 5, "horizontal": true}, {"word": "museum", "x": 1, "y": 8, "horizontal": true}, {"word": "traffic", "x": 0, "y": 3, "horizontal": true}, {"word": "house", "x": 2, "y": 6, "horizontal": false}, {"word": "apartment", "x": 9, "y": 1, "horizontal": false}, {"word": "park", "x": 0, "y": 7, "horizontal": false}, {"word": "school", "x": 7, "y": 3, "horizontal": false}, {"word": "store", "x": 8, "y": 4, "horizontal": false}, {"word": "car", "x": 6, "y": 3, "horizontal": false}, {"word": "library", "x": 1, "y": 0, "horizontal": false}, {"word": "supermarket", "x": 10, "y": 0, "horizontal": false}];
@@ -356,7 +365,7 @@ def main():
     print("Solving took ", (stage_3_start - stage_2_start).total_seconds(), "s")
     print("Solution:")
     print_solution(placement_data, x_bound, y_bound)
-    save_solution(placement_data)
+    # save_solution(placement_data, words_with_hints)
 
 
 if __name__ == '__main__':
