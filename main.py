@@ -1,6 +1,6 @@
 import json
 from datetime import datetime
-from enum import Enum
+from enum import IntEnum
 from itertools import combinations, product
 from typing import Iterable
 from pydantic import BaseModel
@@ -8,7 +8,7 @@ from math import floor, ceil
 
 from pathlib import Path
 
-import pysat.card as PysatCard
+import pysat.card as pysat_card
 from pysat.formula import IDPool
 from pysat.solvers import Mergesat3 as SatSolver
 
@@ -21,7 +21,7 @@ class WordPlacement(BaseModel):
     hint: str = ""
 
 
-class IntersectionType(Enum):
+class IntersectionType(IntEnum):
     CROSSING = 0
     HORIZONTAL_OVERLAP = 1
     VERTICAL_OVERLAP = 2
@@ -153,13 +153,11 @@ def bound_isolated_component_size(words, intersections_per_word, min_component_s
             yield clause
 
 
-def forbid_placement(words, is_in_hor_mode, is_x_coord, is_y_coord, is_placed,
-                     forbidden_placements: list[WordPlacement]):
-    clause = []
+def forbid_placements(words, is_in_hor_mode, is_x_coord, is_y_coord, is_placed,
+                      forbidden_placements: list[WordPlacement]):
     for iw, (w, h) in enumerate(zip(words, is_in_hor_mode)):
         if word_data := next((data for data in forbidden_placements if data.word == w and data.horizontal == h), None):
-            clause.extend([-is_placed[iw], -is_x_coord[iw][word_data.x], -is_y_coord[iw][word_data.y]])
-    return clause
+            yield [-is_placed[iw], -is_x_coord[iw][word_data.x], -is_y_coord[iw][word_data.y]]
 
 
 class IntersectionOptions(BaseModel):
@@ -214,16 +212,16 @@ def make_problem(
 
     if options.max_skewness is not None:
         assert 0. < options.max_skewness <= 1.
-        clauses.extend(PysatCard.CardEnc.atleast(
+        clauses.extend(pysat_card.CardEnc.atleast(
             lits=is_placed[:n_original_words],
             bound=floor(n_original_words * (1 - options.max_skewness) * 0.5),
-            encoding=PysatCard.EncType.seqcounter,
+            encoding=pysat_card.EncType.seqcounter,
             vpool=id_pool).clauses
                        )
-        clauses.extend(PysatCard.CardEnc.atmost(
+        clauses.extend(pysat_card.CardEnc.atmost(
             lits=is_placed[:n_original_words],
             bound=ceil(n_original_words * (1 + options.max_skewness) * 0.5),
-            encoding=PysatCard.EncType.seqcounter,
+            encoding=pysat_card.EncType.seqcounter,
             vpool=id_pool).clauses
                        )
 
@@ -249,19 +247,19 @@ def make_problem(
             clause + [-new_vars[iw]]
             for iw, lits in enumerate(intersection_vars)
             for clause in
-            PysatCard.CardEnc.atleast(lits=lits, bound=options.min_words_with_many_intersections.intersections_bound,
-                                      encoding=PysatCard.EncType.seqcounter, vpool=id_pool).clauses
+            pysat_card.CardEnc.atleast(lits=lits, bound=options.min_words_with_many_intersections.intersections_bound,
+                                       encoding=pysat_card.EncType.seqcounter, vpool=id_pool).clauses
         )
         clauses.extend(
-            PysatCard.CardEnc.atleast(lits=new_vars, bound=options.min_words_with_many_intersections.qty_bound,
-                                      encoding=PysatCard.EncType.seqcounter, vpool=id_pool).clauses
+            pysat_card.CardEnc.atleast(lits=new_vars, bound=options.min_words_with_many_intersections.qty_bound,
+                                       encoding=pysat_card.EncType.seqcounter, vpool=id_pool).clauses
         )
 
     clauses.extend(ensure_nonempty_first_row_and_column(is_x_coord, is_y_coord))
     clauses.extend(ensure_exactly_one_word_placement(words, is_in_hor_mode, is_x_coord, is_y_coord, is_placed))
     clauses.extend(forbid_cells(words, is_in_hor_mode, is_x_coord, is_y_coord, options.forbidden_cells))
     clauses.extend(
-        forbid_placement(words, is_in_hor_mode, is_x_coord, is_y_coord, is_placed, options.forbidden_placements))
+        forbid_placements(words, is_in_hor_mode, is_x_coord, is_y_coord, is_placed, options.forbidden_placements))
     print("Sorting and deduplicating...")
     return list(set(map(tuple, map(sorted, clauses)))), words, is_in_hor_mode, is_placed, is_x_coord, is_y_coord
 
@@ -316,7 +314,7 @@ def save_solution(placement_data: list[WordPlacement], words_with_hints: list):
     placement_data = placement_data.copy()
     for data in placement_data:
         data.hint = next(w["hint"] for w in words_with_hints if w["word"] == data.word)
-    jsonified = json.dumps([data.dict() for data in placement_data], indent=2)
+    jsonified = json.dumps([data.model_dump() for data in placement_data], indent=2)
     Path("output/output.js").write_text(f"var placement_data = {jsonified};")
 
 
