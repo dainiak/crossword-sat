@@ -10,7 +10,15 @@ from pathlib import Path
 
 import pysat.card as pysat_card
 from pysat.formula import IDPool
-from pysat.solvers import Mergesat3 as SatSolver
+# from pysat.solvers import Mergesat3 as SatSolver
+from pysat.solvers import Lingeling as SatSolver
+# from pysat.solvers import MapleChrono as SatSolver
+
+
+class IntersectionType(IntEnum):
+    CROSSING = 0
+    HORIZONTAL_OVERLAP = 1
+    VERTICAL_OVERLAP = 2
 
 
 class WordPlacement(BaseModel):
@@ -21,10 +29,17 @@ class WordPlacement(BaseModel):
     hint: str = ""
 
 
-class IntersectionType(IntEnum):
-    CROSSING = 0
-    HORIZONTAL_OVERLAP = 1
-    VERTICAL_OVERLAP = 2
+class IntersectionOptions(BaseModel):
+    intersections_bound: int
+    qty_bound: int
+
+
+class CrosswordOptions(BaseModel):
+    max_skewness: float = None
+    min_isolated_component_size: int = 2
+    min_words_with_many_intersections: IntersectionOptions = None
+    forbidden_cells: list[tuple[int, int]] = []
+    forbidden_placements: list[WordPlacement] = []
 
 
 def generate_crossing_constraints(
@@ -133,7 +148,21 @@ def forbid_cells(words, is_in_hor_mode, is_x_coord, is_y_coord, forbidden_cells:
             yield [-other_coord_list[c], -fixed_coord_var]
 
 
-def bound_isolated_component_size(words, intersections_per_word, min_component_size):
+def gen_disjunction(target, literals):
+    x = list(literals)
+    x.append(-target)
+    yield x
+    yield from ([target, -v] for v in literals)
+
+
+def gen_conjunction(target, literals):
+    x = [-v for v in literals]
+    x.append(target)
+    yield x
+    yield from ([-target, v] for v in literals)
+
+
+def bound_isolated_component_size(words, intersections_per_word, min_component_size, vpool: IDPool):
     n_unique_words = len(words) // 2
     intersections_per_word = [set(lits) | set(intersections_per_word[iw + n_unique_words]) for iw, lits in
                               enumerate(intersections_per_word[:n_unique_words])]
@@ -145,12 +174,39 @@ def bound_isolated_component_size(words, intersections_per_word, min_component_s
 
     all_word_indices = set(range(n_unique_words))
 
-    for component_size in range(1, min_component_size):
-        for component in combinations(all_word_indices, component_size):
-            clause = []
-            for iw1, iw2 in product(component, all_word_indices - set(component)):
-                clause.extend(pairwise_intersection_vars[iw1][iw2])
-            yield clause
+    if min_component_size >= n_unique_words / 2:
+        cumulative_pairwise_intersection_vars = [[None] * n_unique_words for _ in range(n_unique_words)]
+        for iw1, iw2 in combinations(all_word_indices, 2):
+            if not pairwise_intersection_vars[iw1][iw2]:
+                continue
+            intersection_iw1_iw2 = vpool.id()
+            cumulative_pairwise_intersection_vars[iw1][iw2] = intersection_iw1_iw2
+            cumulative_pairwise_intersection_vars[iw2][iw1] = intersection_iw1_iw2
+            yield from gen_disjunction(intersection_iw1_iw2, pairwise_intersection_vars[iw1][iw2])
+
+        max_distance = n_unique_words
+        reachability_vars = [[vpool.id() for _ in range(n_unique_words)] for __ in range(max_distance)]
+        yield [reachability_vars[0][0]]
+        yield from ([-reachability_vars[0][v]] for v in range(1, len(reachability_vars[0])))
+        yield from ([-reachability_vars[d][0]] for d in range(1, max_distance))
+        yield from ([reachability_vars[-1][v]] for v in range(1, len(reachability_vars[0])))
+
+        products_ijj = [[[None] * n_unique_words for _ in range(n_unique_words)] for d in range(max_distance)]
+        for d in range(1, max_distance):
+            for i in range(1, n_unique_words):
+                for j in range(n_unique_words):
+                    if cumulative_pairwise_intersection_vars[i][j] is None:
+                        continue
+                    products_ijj[d][i][j] = vpool.id()
+                    yield from gen_conjunction(products_ijj[d][i][j], [reachability_vars[d - 1][j], cumulative_pairwise_intersection_vars[i][j]])
+                yield from gen_disjunction(reachability_vars[d][i], [products_ijj[d][i][j] for j in range(n_unique_words) if products_ijj[d][i][j] is not None] + [reachability_vars[d-1][i]])
+    else:
+        for component_size in range(1, min_component_size):
+            for component in combinations(all_word_indices, component_size):
+                clause = []
+                for iw1, iw2 in product(component, all_word_indices - set(component)):
+                    clause.extend(pairwise_intersection_vars[iw1][iw2])
+                yield clause
 
 
 def forbid_placements(words, is_in_hor_mode, is_x_coord, is_y_coord, is_placed,
@@ -158,19 +214,6 @@ def forbid_placements(words, is_in_hor_mode, is_x_coord, is_y_coord, is_placed,
     for iw, (w, h) in enumerate(zip(words, is_in_hor_mode)):
         if word_data := next((data for data in forbidden_placements if data.word == w and data.horizontal == h), None):
             yield [-is_placed[iw], -is_x_coord[iw][word_data.x], -is_y_coord[iw][word_data.y]]
-
-
-class IntersectionOptions(BaseModel):
-    intersections_bound: int
-    qty_bound: int
-
-
-class CrosswordOptions(BaseModel):
-    max_skewness: float = None
-    min_isolated_component_size: int = 2
-    min_words_with_many_intersections: IntersectionOptions = None
-    forbidden_cells: list[tuple[int, int]] = []
-    forbidden_placements: list[WordPlacement] = []
 
 
 def guaranteed_infeasible(words, x_bound, y_bound):
@@ -239,7 +282,12 @@ def make_problem(
             clauses.append(list(lits) + [-is_placed[i]])
     elif options.min_isolated_component_size > 2:
         min_isolated_component_size = min(options.min_isolated_component_size, (n_original_words + 1) // 2)
-        clauses.extend(bound_isolated_component_size(words, intersection_vars, min_isolated_component_size))
+        clauses.extend(bound_isolated_component_size(
+            words,
+            intersection_vars,
+            min_isolated_component_size,
+            vpool=id_pool
+        ))
 
     if options.min_words_with_many_intersections is not None:
         new_vars = [id_pool.id() for _ in words]
@@ -325,12 +373,12 @@ def main():
        {"word": "pan", "hint": "We cook pancakes on this round, flat plate with a handle."},
        {"word": "colander", "hint": "A bowl-shaped thing we use to drain water from pasta."},
        {"word": "blender", "hint": "It's like a big machine that mixes food into smoothies or soups."},
-       {"word": "oven", "hint": "A place where we bake cookies and cakes to be yummy and hot."},
-       {"word": "spatula", "hint": "This flat tool helps us flip pancakes without breaking them."},
-       {"word": "whisk", "hint": "We use it to mix things like eggs or cream really well."},
-       {"word": "tongs", "hint": "A pair of tools with arms that help us pick up hot food from the stove."},
-       {"word": "mixer", "hint": "It has blades that spin around; we use it for making dough or whipping cream."},
-       {"word": "grater", "hint": "This tool with sharp holes helps us shred cheese into small pieces."},
+       # {"word": "oven", "hint": "A place where we bake cookies and cakes to be yummy and hot."},
+       # {"word": "spatula", "hint": "This flat tool helps us flip pancakes without breaking them."},
+       # {"word": "whisk", "hint": "We use it to mix things like eggs or cream really well."},
+       # {"word": "tongs", "hint": "A pair of tools with arms that help us pick up hot food from the stove."},
+       # {"word": "mixer", "hint": "It has blades that spin around; we use it for making dough or whipping cream."},
+       # {"word": "grater", "hint": "This tool with sharp holes helps us shred cheese into small pieces."},
        {"word": "ladle", "hint": "It's a big spoon for scooping soup or stew into bowls."},
        {"word": "peeler", "hint": "A small tool that takes off the skin of fruits and vegetables like apples."},
        {"word": "scissors", "hint": "We use these to cut paper, but not for food; they're kitchen scissors."},
@@ -343,15 +391,18 @@ def main():
     #     "turtle", "frog", "duck", "fish", "shark", "whale", "dolphin", "octopus", "butterfly", "swan", "eagle", "owl", "parrot", "bat"
     # ]
 
-    x_bound = 11
-    y_bound = 8
+    x_bound = 20
+    y_bound = 20
     # var placement_data = [{"word": "cake", "x": 6, "y": 9, "horizontal": true}, {"word": "soda", "x": 4, "y": 4, "horizontal": true}, {"word": "salad", "x": 1, "y": 7, "horizontal": true}, {"word": "sushi", "x": 4, "y": 3, "horizontal": true}, {"word": "pasta", "x": 1, "y": 9, "horizontal": true}, {"word": "corn", "x": 3, "y": 6, "horizontal": true}, {"word": "bean", "x": 0, "y": 4, "horizontal": true}, {"word": "chef", "x": 5, "y": 0, "horizontal": true}, {"word": "menu", "x": 5, "y": 2, "horizontal": true}, {"word": "plate", "x": 3, "y": 1, "horizontal": true}, {"word": "feast", "x": 0, "y": 5, "horizontal": true}, {"word": "taste", "x": 2, "y": 8, "horizontal": true}, {"word": "table", "x": 5, "y": 5, "horizontal": true}, {"word": "pizza", "x": 2, "y": 0, "horizontal": false}, {"word": "juice", "x": 1, "y": 0, "horizontal": false}, {"word": "burger", "x": 9, "y": 1, "horizontal": false}, {"word": "toast", "x": 4, "y": 5, "horizontal": false}, {"word": "fruit", "x": 8, "y": 0, "horizontal": false}, {"word": "milk", "x": 8, "y": 6, "horizontal": false}, {"word": "rice", "x": 9, "y": 6, "horizontal": false}, {"word": "fork", "x": 0, "y": 5, "horizontal": false}, {"word": "spoon", "x": 3, "y": 0, "horizontal": false}, {"word": "bowl", "x": 7, "y": 5, "horizontal": false}, {"word": "glass", "x": 4, "y": 0, "horizontal": false}];
     # var placement_data = [{"word": "elephant", "x": 1, "y": 11, "horizontal": true}, {"word": "giraffe", "x": 1, "y": 1, "horizontal": true}, {"word": "tiger", "x": 1, "y": 8, "horizontal": true}, {"word": "bear", "x": 1, "y": 9, "horizontal": true}, {"word": "rabbit", "x": 4, "y": 9, "horizontal": true}, {"word": "ant", "x": 6, "y": 11, "horizontal": true}, {"word": "frog", "x": 7, "y": 3, "horizontal": true}, {"word": "duck", "x": 8, "y": 8, "horizontal": true}, {"word": "whale", "x": 1, "y": 4, "horizontal": true}, {"word": "dolphin", "x": 0, "y": 0, "horizontal": true}, {"word": "butterfly", "x": 2, "y": 10, "horizontal": true}, {"word": "eagle", "x": 1, "y": 7, "horizontal": true}, {"word": "parrot", "x": 0, "y": 5, "horizontal": true}, {"word": "bat", "x": 4, "y": 3, "horizontal": true}, {"word": "zebra", "x": 8, "y": 0, "horizontal": false}, {"word": "kangaroo", "x": 10, "y": 0, "horizontal": false}, {"word": "penguin", "x": 0, "y": 5, "horizontal": false}, {"word": "lion", "x": 2, "y": 0, "horizontal": false}, {"word": "monkey", "x": 11, "y": 5, "horizontal": false}, {"word": "rat", "x": 5, "y": 8, "horizontal": false}, {"word": "bee", "x": 1, "y": 9, "horizontal": false}, {"word": "turtle", "x": 6, "y": 3, "horizontal": false}, {"word": "fish", "x": 7, "y": 3, "horizontal": false}, {"word": "shark", "x": 3, "y": 2, "horizontal": false}, {"word": "octopus", "x": 9, "y": 0, "horizontal": false}, {"word": "swan", "x": 1, "y": 3, "horizontal": false}, {"word": "owl", "x": 4, "y": 5, "horizontal": false}];
     # var placement_data = [{"word": "street", "x": 5, "y": 10, "horizontal": true}, {"word": "bus", "x": 3, "y": 10, "horizontal": true}, {"word": "tree", "x": 6, "y": 10, "horizontal": true}, {"word": "garden", "x": 0, "y": 4, "horizontal": true}, {"word": "kitchen", "x": 0, "y": 1, "horizontal": true}, {"word": "bedroom", "x": 3, "y": 6, "horizontal": true}, {"word": "bathroom", "x": 1, "y": 2, "horizontal": true}, {"word": "playground", "x": 0, "y": 0, "horizontal": true}, {"word": "restaurant", "x": 0, "y": 9, "horizontal": true}, {"word": "bridge", "x": 0, "y": 5, "horizontal": true}, {"word": "museum", "x": 1, "y": 8, "horizontal": true}, {"word": "traffic", "x": 0, "y": 3, "horizontal": true}, {"word": "house", "x": 2, "y": 6, "horizontal": false}, {"word": "apartment", "x": 9, "y": 1, "horizontal": false}, {"word": "park", "x": 0, "y": 7, "horizontal": false}, {"word": "school", "x": 7, "y": 3, "horizontal": false}, {"word": "store", "x": 8, "y": 4, "horizontal": false}, {"word": "car", "x": 6, "y": 3, "horizontal": false}, {"word": "library", "x": 1, "y": 0, "horizontal": false}, {"word": "supermarket", "x": 10, "y": 0, "horizontal": false}];
 
     stage_1_start = datetime.now()
     print("Generating clauses...")
-    clauses, words_extended, is_in_hor_mode, is_placed, is_x_coord, is_y_coord = make_problem(words, x_bound, y_bound)
+    clauses, words_extended, is_in_hor_mode, is_placed, is_x_coord, is_y_coord = make_problem(
+        words, x_bound, y_bound,
+        CrosswordOptions(min_isolated_component_size=20)
+    )
     stage_2_start = datetime.now()
     print("Clause generation took ", (stage_2_start - stage_1_start).total_seconds(), "s")
     print("Number of clauses: ", len(clauses))
