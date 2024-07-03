@@ -11,7 +11,8 @@ from pathlib import Path
 import pysat.card as pysat_card
 from pysat.formula import IDPool
 # from pysat.solvers import Mergesat3 as SatSolver
-from pysat.solvers import Lingeling as SatSolver
+from pysat.solvers import CryptoMinisat as SatSolver
+# from pysat.solvers import Lingeling as SatSolver
 # from pysat.solvers import MapleChrono as SatSolver
 
 
@@ -180,50 +181,74 @@ def gen_conjunction(target, literals):
 
 
 def bound_isolated_component_size(words, intersections_per_word, min_component_size, vpool: IDPool):
+    if not min_component_size or min_component_size <= 1:
+        yield from ()
+        return
+
     n_unique_words = len(words) // 2
-    intersections_per_word = [set(lits) | set(intersections_per_word[iw + n_unique_words]) for iw, lits in
-                              enumerate(intersections_per_word[:n_unique_words])]
+    min_component_size = min(min_component_size, (n_unique_words + 1) // 2)
+    intersections_per_word = [set(intersections_per_word[iw]) | set(intersections_per_word[iw + n_unique_words]) for iw in range(n_unique_words)]
+
+    if min_component_size >= 2:
+        yield from (list(intersections) for intersections in intersections_per_word)
+
+    if min_component_size == 2:
+        return
 
     pairwise_intersection_vars = [[set() for _ in range(n_unique_words)] for __ in range(n_unique_words)]
     for iw1, iw2 in combinations(range(n_unique_words), 2):
         pairwise_intersection_vars[iw1][iw2] = intersections_per_word[iw1] & intersections_per_word[iw2]
         pairwise_intersection_vars[iw2][iw1] = pairwise_intersection_vars[iw1][iw2]
 
-    all_word_indices = set(range(n_unique_words))
+    cumulative_pairwise_intersection_vars = [[None] * n_unique_words for _ in range(n_unique_words)]
+    for iw1, iw2 in combinations(range(n_unique_words), 2):
+        if not pairwise_intersection_vars[iw1][iw2]:
+            continue
+        intersection_iw1_iw2 = vpool.id()
+        cumulative_pairwise_intersection_vars[iw1][iw2] = intersection_iw1_iw2
+        cumulative_pairwise_intersection_vars[iw2][iw1] = intersection_iw1_iw2
+        yield from gen_disjunction(intersection_iw1_iw2, pairwise_intersection_vars[iw1][iw2])
 
-    if min_component_size >= n_unique_words / 2:
-        cumulative_pairwise_intersection_vars = [[None] * n_unique_words for _ in range(n_unique_words)]
-        for iw1, iw2 in combinations(all_word_indices, 2):
-            if not pairwise_intersection_vars[iw1][iw2]:
-                continue
-            intersection_iw1_iw2 = vpool.id()
-            cumulative_pairwise_intersection_vars[iw1][iw2] = intersection_iw1_iw2
-            cumulative_pairwise_intersection_vars[iw2][iw1] = intersection_iw1_iw2
-            yield from gen_disjunction(intersection_iw1_iw2, pairwise_intersection_vars[iw1][iw2])
+    for iw1, iw2 in combinations(range(n_unique_words), 2):
+        if cumulative_pairwise_intersection_vars[iw1][iw2] is None:
+            continue
+        x = [-cumulative_pairwise_intersection_vars[iw1][iw2]]
+        for iw in (iw1, iw2):
+            x.extend(
+                cumulative_pairwise_intersection_vars[iw][jw]
+                for jw in range(n_unique_words)
+                if jw != iw1 and jw != iw2 and cumulative_pairwise_intersection_vars[iw][jw] is not None
+            )
+        yield x
 
-        max_distance = n_unique_words
-        reachability_vars = [[vpool.id() for _ in range(n_unique_words)] for __ in range(max_distance)]
-        yield [reachability_vars[0][0]]
-        yield from ([-reachability_vars[0][v]] for v in range(1, len(reachability_vars[0])))
-        yield from ([-reachability_vars[d][0]] for d in range(1, max_distance))
-        yield from ([reachability_vars[-1][v]] for v in range(1, len(reachability_vars[0])))
-
-        products_ijj: Any = [[[None] * n_unique_words for _ in range(n_unique_words)] for d in range(max_distance)]
-        for d in range(1, max_distance):
-            for i in range(1, n_unique_words):
-                for j in range(n_unique_words):
-                    if cumulative_pairwise_intersection_vars[i][j] is None:
-                        continue
-                    products_ijj[d][i][j] = vpool.id()
-                    yield from gen_conjunction(products_ijj[d][i][j], [reachability_vars[d - 1][j], cumulative_pairwise_intersection_vars[i][j]])
-                yield from gen_disjunction(reachability_vars[d][i], [products_ijj[d][i][j] for j in range(n_unique_words) if products_ijj[d][i][j] is not None] + [reachability_vars[d-1][i]])
-    else:
-        for component_size in range(1, min_component_size):
+    if 4 <= min_component_size <= n_unique_words // 2:
+        all_word_indices = set(range(n_unique_words))
+        for component_size in range(3, min_component_size):
             for component in combinations(all_word_indices, component_size):
-                clause = []
-                for iw1, iw2 in product(component, all_word_indices - set(component)):
-                    clause.extend(pairwise_intersection_vars[iw1][iw2])
-                yield clause
+                yield [
+                    cumulative_pairwise_intersection_vars[iw1][iw2]
+                    for iw1, iw2 in product(component, all_word_indices - set(component))
+                    if cumulative_pairwise_intersection_vars[iw1][iw2] is not None
+                ]
+        return
+
+    # case of total connectivity below
+    max_distance = n_unique_words
+    reachability_vars = [[vpool.id() for _ in range(n_unique_words)] for __ in range(max_distance)]
+    yield [reachability_vars[0][0]]
+    yield from ([-reachability_vars[0][v]] for v in range(1, len(reachability_vars[0])))
+    yield from ([-reachability_vars[d][0]] for d in range(1, max_distance))
+    yield from ([reachability_vars[-1][v]] for v in range(1, len(reachability_vars[0])))
+
+    products_ijj: Any = [[[None] * n_unique_words for _ in range(n_unique_words)] for d in range(max_distance)]
+    for d in range(1, max_distance):
+        for i in range(1, n_unique_words):
+            for j in range(n_unique_words):
+                if cumulative_pairwise_intersection_vars[i][j] is None:
+                    continue
+                products_ijj[d][i][j] = vpool.id()
+                yield from gen_conjunction(products_ijj[d][i][j], [reachability_vars[d - 1][j], cumulative_pairwise_intersection_vars[i][j]])
+            yield from gen_disjunction(reachability_vars[d][i], [products_ijj[d][i][j] for j in range(n_unique_words) if products_ijj[d][i][j] is not None] + [reachability_vars[d-1][i]])
 
 
 def forbid_placements(words, is_in_hor_mode, is_x_coord, is_y_coord, is_placed,
@@ -296,17 +321,12 @@ def make_problem(
     )
     clauses.extend(clause_list)
 
-    if options.min_isolated_component_size == 2:
-        for i, lits in enumerate(intersection_vars):
-            clauses.append(list(lits) + [-is_placed[i]])
-    elif options.min_isolated_component_size > 2:
-        min_isolated_component_size = min(options.min_isolated_component_size, (n_original_words + 1) // 2)
-        clauses.extend(bound_isolated_component_size(
-            words,
-            intersection_vars,
-            min_isolated_component_size,
-            vpool=id_pool
-        ))
+    clauses.extend(bound_isolated_component_size(
+        words,
+        intersection_vars,
+        options.min_isolated_component_size,
+        vpool=id_pool
+    ))
 
     if options.min_words_with_many_intersections is not None:
         new_vars = [id_pool.id() for _ in words]
@@ -436,8 +456,10 @@ def test():
     #     "turtle", "frog", "duck", "fish", "shark", "whale", "dolphin", "octopus", "butterfly", "swan", "eagle", "owl", "parrot", "bat"
     # ]
 
-    x_bound = 20
-    y_bound = 20
+    # possible for total connectivity
+    # x_bound, y_bound = 18, 11
+    x_bound, y_bound = 18, 11
+
     # var placement_data = [{"word": "cake", "x": 6, "y": 9, "horizontal": true}, {"word": "soda", "x": 4, "y": 4, "horizontal": true}, {"word": "salad", "x": 1, "y": 7, "horizontal": true}, {"word": "sushi", "x": 4, "y": 3, "horizontal": true}, {"word": "pasta", "x": 1, "y": 9, "horizontal": true}, {"word": "corn", "x": 3, "y": 6, "horizontal": true}, {"word": "bean", "x": 0, "y": 4, "horizontal": true}, {"word": "chef", "x": 5, "y": 0, "horizontal": true}, {"word": "menu", "x": 5, "y": 2, "horizontal": true}, {"word": "plate", "x": 3, "y": 1, "horizontal": true}, {"word": "feast", "x": 0, "y": 5, "horizontal": true}, {"word": "taste", "x": 2, "y": 8, "horizontal": true}, {"word": "table", "x": 5, "y": 5, "horizontal": true}, {"word": "pizza", "x": 2, "y": 0, "horizontal": false}, {"word": "juice", "x": 1, "y": 0, "horizontal": false}, {"word": "burger", "x": 9, "y": 1, "horizontal": false}, {"word": "toast", "x": 4, "y": 5, "horizontal": false}, {"word": "fruit", "x": 8, "y": 0, "horizontal": false}, {"word": "milk", "x": 8, "y": 6, "horizontal": false}, {"word": "rice", "x": 9, "y": 6, "horizontal": false}, {"word": "fork", "x": 0, "y": 5, "horizontal": false}, {"word": "spoon", "x": 3, "y": 0, "horizontal": false}, {"word": "bowl", "x": 7, "y": 5, "horizontal": false}, {"word": "glass", "x": 4, "y": 0, "horizontal": false}];
     # var placement_data = [{"word": "elephant", "x": 1, "y": 11, "horizontal": true}, {"word": "giraffe", "x": 1, "y": 1, "horizontal": true}, {"word": "tiger", "x": 1, "y": 8, "horizontal": true}, {"word": "bear", "x": 1, "y": 9, "horizontal": true}, {"word": "rabbit", "x": 4, "y": 9, "horizontal": true}, {"word": "ant", "x": 6, "y": 11, "horizontal": true}, {"word": "frog", "x": 7, "y": 3, "horizontal": true}, {"word": "duck", "x": 8, "y": 8, "horizontal": true}, {"word": "whale", "x": 1, "y": 4, "horizontal": true}, {"word": "dolphin", "x": 0, "y": 0, "horizontal": true}, {"word": "butterfly", "x": 2, "y": 10, "horizontal": true}, {"word": "eagle", "x": 1, "y": 7, "horizontal": true}, {"word": "parrot", "x": 0, "y": 5, "horizontal": true}, {"word": "bat", "x": 4, "y": 3, "horizontal": true}, {"word": "zebra", "x": 8, "y": 0, "horizontal": false}, {"word": "kangaroo", "x": 10, "y": 0, "horizontal": false}, {"word": "penguin", "x": 0, "y": 5, "horizontal": false}, {"word": "lion", "x": 2, "y": 0, "horizontal": false}, {"word": "monkey", "x": 11, "y": 5, "horizontal": false}, {"word": "rat", "x": 5, "y": 8, "horizontal": false}, {"word": "bee", "x": 1, "y": 9, "horizontal": false}, {"word": "turtle", "x": 6, "y": 3, "horizontal": false}, {"word": "fish", "x": 7, "y": 3, "horizontal": false}, {"word": "shark", "x": 3, "y": 2, "horizontal": false}, {"word": "octopus", "x": 9, "y": 0, "horizontal": false}, {"word": "swan", "x": 1, "y": 3, "horizontal": false}, {"word": "owl", "x": 4, "y": 5, "horizontal": false}];
     # var placement_data = [{"word": "street", "x": 5, "y": 10, "horizontal": true}, {"word": "bus", "x": 3, "y": 10, "horizontal": true}, {"word": "tree", "x": 6, "y": 10, "horizontal": true}, {"word": "garden", "x": 0, "y": 4, "horizontal": true}, {"word": "kitchen", "x": 0, "y": 1, "horizontal": true}, {"word": "bedroom", "x": 3, "y": 6, "horizontal": true}, {"word": "bathroom", "x": 1, "y": 2, "horizontal": true}, {"word": "playground", "x": 0, "y": 0, "horizontal": true}, {"word": "restaurant", "x": 0, "y": 9, "horizontal": true}, {"word": "bridge", "x": 0, "y": 5, "horizontal": true}, {"word": "museum", "x": 1, "y": 8, "horizontal": true}, {"word": "traffic", "x": 0, "y": 3, "horizontal": true}, {"word": "house", "x": 2, "y": 6, "horizontal": false}, {"word": "apartment", "x": 9, "y": 1, "horizontal": false}, {"word": "park", "x": 0, "y": 7, "horizontal": false}, {"word": "school", "x": 7, "y": 3, "horizontal": false}, {"word": "store", "x": 8, "y": 4, "horizontal": false}, {"word": "car", "x": 6, "y": 3, "horizontal": false}, {"word": "library", "x": 1, "y": 0, "horizontal": false}, {"word": "supermarket", "x": 10, "y": 0, "horizontal": false}];
