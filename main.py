@@ -2,8 +2,8 @@ import json
 from datetime import datetime
 from enum import IntEnum
 from itertools import combinations, product
-from typing import Iterable
-from pydantic import BaseModel
+from typing import Any, Iterable
+import dataclasses
 from math import floor, ceil
 
 from pathlib import Path
@@ -21,25 +21,40 @@ class IntersectionType(IntEnum):
     VERTICAL_OVERLAP = 2
 
 
-class WordPlacement(BaseModel):
+@dataclasses.dataclass
+class WordPlacement:
     word: str
     x: int
     y: int
     horizontal: bool
-    hint: str = ""
 
 
-class IntersectionOptions(BaseModel):
+@dataclasses.dataclass
+class IntersectionOptions:
     intersections_bound: int
     qty_bound: int
 
 
-class CrosswordOptions(BaseModel):
+@dataclasses.dataclass
+class CrosswordOptions:
     max_skewness: float = None
     min_isolated_component_size: int = 2
     min_words_with_many_intersections: IntersectionOptions = None
-    forbidden_cells: list[tuple[int, int]] = []
-    forbidden_placements: list[WordPlacement] = []
+    forbidden_cells: list[tuple[int, int]] = None
+    forbidden_placements: list[WordPlacement] = None
+
+    def __post_init__(self):
+        if self.forbidden_placements:
+            self.forbidden_placements = [WordPlacement(**data) if isinstance(data, dict) else data for data in self.forbidden_placements]
+        if isinstance(self.min_words_with_many_intersections, dict):
+            self.min_words_with_many_intersections = IntersectionOptions(**self.min_words_with_many_intersections)
+
+
+class EnhancedJSONEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if dataclasses.is_dataclass(obj):
+            return dataclasses.asdict(obj)
+        return super().default(obj)
 
 
 def generate_crossing_constraints(
@@ -139,6 +154,8 @@ def ensure_exactly_one_word_placement(words, is_in_hor_mode, is_x_coord, is_y_co
 
 
 def forbid_cells(words, is_in_hor_mode, is_x_coord, is_y_coord, forbidden_cells: list[tuple[int, int]]):
+    if not forbidden_cells:
+        return
     for (x, y), (iw, w) in product(forbidden_cells, enumerate(words)):
         if is_in_hor_mode[iw]:
             fixed_coord_var, other_coord, other_coord_list = is_y_coord[iw][y], x, is_x_coord[iw]
@@ -191,7 +208,7 @@ def bound_isolated_component_size(words, intersections_per_word, min_component_s
         yield from ([-reachability_vars[d][0]] for d in range(1, max_distance))
         yield from ([reachability_vars[-1][v]] for v in range(1, len(reachability_vars[0])))
 
-        products_ijj = [[[None] * n_unique_words for _ in range(n_unique_words)] for d in range(max_distance)]
+        products_ijj: Any = [[[None] * n_unique_words for _ in range(n_unique_words)] for d in range(max_distance)]
         for d in range(1, max_distance):
             for i in range(1, n_unique_words):
                 for j in range(n_unique_words):
@@ -211,6 +228,8 @@ def bound_isolated_component_size(words, intersections_per_word, min_component_s
 
 def forbid_placements(words, is_in_hor_mode, is_x_coord, is_y_coord, is_placed,
                       forbidden_placements: list[WordPlacement]):
+    if not forbidden_placements:
+        return
     for iw, (w, h) in enumerate(zip(words, is_in_hor_mode)):
         if word_data := next((data for data in forbidden_placements if data.word == w and data.horizontal == h), None):
             yield [-is_placed[iw], -is_x_coord[iw][word_data.x], -is_y_coord[iw][word_data.y]]
@@ -362,23 +381,49 @@ def save_solution(placement_data: list[WordPlacement], words_with_hints: list):
     placement_data = placement_data.copy()
     for data in placement_data:
         data.hint = next(w["hint"] for w in words_with_hints if w["word"] == data.word)
-    jsonified = json.dumps([data.model_dump() for data in placement_data], indent=2)
+    jsonified = json.dumps(placement_data, cls=EnhancedJSONEncoder, indent=2)
     Path("output/output.js").write_text(f"var placement_data = {jsonified};")
 
 
-def main():
+def solve_from_json(params_json):
+    kwargs = json.loads(params_json)
+    words, x_bound, y_bound = kwargs["words"], kwargs["x_bound"], kwargs["y_bound"]
+    for key in ("words", "x_bound", "y_bound"):
+        kwargs.pop(key)
+    crossword_options = None
+    if kwargs:
+        crossword_options = CrosswordOptions(**kwargs)
+
+    stage_1_start = datetime.now()
+    print("DIAG: Generating clauses...")
+    clauses, words_extended, is_in_hor_mode, is_placed, is_x_coord, is_y_coord = make_problem(words, x_bound, y_bound, crossword_options)
+    stage_2_start = datetime.now()
+    print("DIAG: Clause generation took ", (stage_2_start - stage_1_start).total_seconds(), "s")
+    print("DIAG: Number of clauses: ", len(clauses))
+
+    print("DIAG: Solving...")
+    placement_data = solve_problem(clauses, words_extended, is_in_hor_mode, is_placed, is_x_coord, is_y_coord)
+    stage_3_start = datetime.now()
+    print("DIAG: Solving took ", (stage_3_start - stage_2_start).total_seconds(), "s")
+    print("DIAG: Solution:")
+    print_solution(placement_data, x_bound, y_bound)
+
+    return json.dumps(placement_data, cls=EnhancedJSONEncoder)
+
+
+def test():
     words_with_hints = [
        {"word": "spoon", "hint": "A small tool we use for stirring soup and eating cereal."},
        {"word": "fork", "hint": "It has three points; we use to pick up food like vegetables or meat."},
        {"word": "pan", "hint": "We cook pancakes on this round, flat plate with a handle."},
        {"word": "colander", "hint": "A bowl-shaped thing we use to drain water from pasta."},
        {"word": "blender", "hint": "It's like a big machine that mixes food into smoothies or soups."},
-       # {"word": "oven", "hint": "A place where we bake cookies and cakes to be yummy and hot."},
-       # {"word": "spatula", "hint": "This flat tool helps us flip pancakes without breaking them."},
-       # {"word": "whisk", "hint": "We use it to mix things like eggs or cream really well."},
-       # {"word": "tongs", "hint": "A pair of tools with arms that help us pick up hot food from the stove."},
-       # {"word": "mixer", "hint": "It has blades that spin around; we use it for making dough or whipping cream."},
-       # {"word": "grater", "hint": "This tool with sharp holes helps us shred cheese into small pieces."},
+       {"word": "oven", "hint": "A place where we bake cookies and cakes to be yummy and hot."},
+       {"word": "spatula", "hint": "This flat tool helps us flip pancakes without breaking them."},
+       {"word": "whisk", "hint": "We use it to mix things like eggs or cream really well."},
+       {"word": "tongs", "hint": "A pair of tools with arms that help us pick up hot food from the stove."},
+       {"word": "mixer", "hint": "It has blades that spin around; we use it for making dough or whipping cream."},
+       {"word": "grater", "hint": "This tool with sharp holes helps us shred cheese into small pieces."},
        {"word": "ladle", "hint": "It's a big spoon for scooping soup or stew into bowls."},
        {"word": "peeler", "hint": "A small tool that takes off the skin of fruits and vegetables like apples."},
        {"word": "scissors", "hint": "We use these to cut paper, but not for food; they're kitchen scissors."},
@@ -418,4 +463,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    test()
