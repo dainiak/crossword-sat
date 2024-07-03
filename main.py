@@ -1,19 +1,19 @@
+import dataclasses
 import json
 from datetime import datetime
 from enum import IntEnum
 from itertools import combinations, product
-from typing import Any, Iterable
-import dataclasses
 from math import floor, ceil
-
 from pathlib import Path
+from typing import Any, Iterable
 
 import pysat.card as pysat_card
 from pysat.formula import IDPool
 # from pysat.solvers import Mergesat3 as SatSolver
-from pysat.solvers import CryptoMinisat as SatSolver
+# from pysat.solvers import CryptoMinisat as SatSolver
 # from pysat.solvers import Lingeling as SatSolver
 # from pysat.solvers import MapleChrono as SatSolver
+from pysat.solvers import MapleCM as SatSolver
 
 
 class IntersectionType(IntEnum):
@@ -180,27 +180,25 @@ def gen_conjunction(target, literals):
     yield from ([-target, v] for v in literals)
 
 
-def bound_isolated_component_size(words, intersections_per_word, min_component_size, vpool: IDPool):
-    if not min_component_size or min_component_size <= 1:
+def bound_isolated_component_size(n_unique_words, intersections_per_word, min_component_size, vpool: IDPool):
+    if not min_component_size or min_component_size <= 1 or n_unique_words < 2:
         yield from ()
         return
 
-    n_unique_words = len(words) // 2
-    min_component_size = min(min_component_size, (n_unique_words + 1) // 2)
+    min_component_size = min(min_component_size, n_unique_words // 2 + 1)
     intersections_per_word = [set(intersections_per_word[iw]) | set(intersections_per_word[iw + n_unique_words]) for iw in range(n_unique_words)]
 
-    if min_component_size >= 2:
-        yield from (list(intersections) for intersections in intersections_per_word)
-
     if min_component_size == 2:
+        yield from (list(intersections) for intersections in intersections_per_word)
         return
 
+    # creating pairwise word intersection variables
     pairwise_intersection_vars = [[set() for _ in range(n_unique_words)] for __ in range(n_unique_words)]
     for iw1, iw2 in combinations(range(n_unique_words), 2):
         pairwise_intersection_vars[iw1][iw2] = intersections_per_word[iw1] & intersections_per_word[iw2]
         pairwise_intersection_vars[iw2][iw1] = pairwise_intersection_vars[iw1][iw2]
 
-    cumulative_pairwise_intersection_vars = [[None] * n_unique_words for _ in range(n_unique_words)]
+    cumulative_pairwise_intersection_vars: Any = [[None] * n_unique_words for _ in range(n_unique_words)]
     for iw1, iw2 in combinations(range(n_unique_words), 2):
         if not pairwise_intersection_vars[iw1][iw2]:
             continue
@@ -209,6 +207,14 @@ def bound_isolated_component_size(words, intersections_per_word, min_component_s
         cumulative_pairwise_intersection_vars[iw2][iw1] = intersection_iw1_iw2
         yield from gen_disjunction(intersection_iw1_iw2, pairwise_intersection_vars[iw1][iw2])
 
+    # ruling out singleton words via constraints on cumulative variables
+    yield from (
+        [cumulative_pairwise_intersection_vars[iw1][iw2] for iw2 in range(n_unique_words) if
+         cumulative_pairwise_intersection_vars[iw1][iw2] is not None]
+        for iw1 in range(n_unique_words)
+    )
+
+    # ruling out isolated components of size = 2
     for iw1, iw2 in combinations(range(n_unique_words), 2):
         if cumulative_pairwise_intersection_vars[iw1][iw2] is None:
             continue
@@ -221,6 +227,7 @@ def bound_isolated_component_size(words, intersections_per_word, min_component_s
             )
         yield x
 
+    # ruling out isolated components of size = 3 or larger, but not in case of total connectivity constraint
     if 4 <= min_component_size <= n_unique_words // 2:
         all_word_indices = set(range(n_unique_words))
         for component_size in range(3, min_component_size):
@@ -230,9 +237,11 @@ def bound_isolated_component_size(words, intersections_per_word, min_component_s
                     for iw1, iw2 in product(component, all_word_indices - set(component))
                     if cumulative_pairwise_intersection_vars[iw1][iw2] is not None
                 ]
+
+    if min_component_size <= max(3, n_unique_words // 2):
         return
 
-    # case of total connectivity below
+    # total connectivity case
     max_distance = n_unique_words
     reachability_vars = [[vpool.id() for _ in range(n_unique_words)] for __ in range(max_distance)]
     yield [reachability_vars[0][0]]
@@ -247,8 +256,11 @@ def bound_isolated_component_size(words, intersections_per_word, min_component_s
                 if cumulative_pairwise_intersection_vars[i][j] is None:
                     continue
                 products_ijj[d][i][j] = vpool.id()
-                yield from gen_conjunction(products_ijj[d][i][j], [reachability_vars[d - 1][j], cumulative_pairwise_intersection_vars[i][j]])
-            yield from gen_disjunction(reachability_vars[d][i], [products_ijj[d][i][j] for j in range(n_unique_words) if products_ijj[d][i][j] is not None] + [reachability_vars[d-1][i]])
+                yield from gen_conjunction(products_ijj[d][i][j], [reachability_vars[d - 1][j],
+                                                                   cumulative_pairwise_intersection_vars[i][j]])
+            yield from gen_disjunction(reachability_vars[d][i],
+                                       [products_ijj[d][i][j] for j in range(n_unique_words) if
+                                        products_ijj[d][i][j] is not None] + [reachability_vars[d - 1][i]])
 
 
 def forbid_placements(words, is_in_hor_mode, is_x_coord, is_y_coord, is_placed,
@@ -322,7 +334,7 @@ def make_problem(
     clauses.extend(clause_list)
 
     clauses.extend(bound_isolated_component_size(
-        words,
+        n_original_words,
         intersection_vars,
         options.min_isolated_component_size,
         vpool=id_pool
@@ -456,8 +468,10 @@ def test():
     #     "turtle", "frog", "duck", "fish", "shark", "whale", "dolphin", "octopus", "butterfly", "swan", "eagle", "owl", "parrot", "bat"
     # ]
 
-    # possible for total connectivity
+    # possible for total connectivity,
     # x_bound, y_bound = 18, 11
+    # smallest area, very good with Lingeling for component size = 4
+    # x_bound, y_bound = 8, 11
     x_bound, y_bound = 18, 11
 
     # var placement_data = [{"word": "cake", "x": 6, "y": 9, "horizontal": true}, {"word": "soda", "x": 4, "y": 4, "horizontal": true}, {"word": "salad", "x": 1, "y": 7, "horizontal": true}, {"word": "sushi", "x": 4, "y": 3, "horizontal": true}, {"word": "pasta", "x": 1, "y": 9, "horizontal": true}, {"word": "corn", "x": 3, "y": 6, "horizontal": true}, {"word": "bean", "x": 0, "y": 4, "horizontal": true}, {"word": "chef", "x": 5, "y": 0, "horizontal": true}, {"word": "menu", "x": 5, "y": 2, "horizontal": true}, {"word": "plate", "x": 3, "y": 1, "horizontal": true}, {"word": "feast", "x": 0, "y": 5, "horizontal": true}, {"word": "taste", "x": 2, "y": 8, "horizontal": true}, {"word": "table", "x": 5, "y": 5, "horizontal": true}, {"word": "pizza", "x": 2, "y": 0, "horizontal": false}, {"word": "juice", "x": 1, "y": 0, "horizontal": false}, {"word": "burger", "x": 9, "y": 1, "horizontal": false}, {"word": "toast", "x": 4, "y": 5, "horizontal": false}, {"word": "fruit", "x": 8, "y": 0, "horizontal": false}, {"word": "milk", "x": 8, "y": 6, "horizontal": false}, {"word": "rice", "x": 9, "y": 6, "horizontal": false}, {"word": "fork", "x": 0, "y": 5, "horizontal": false}, {"word": "spoon", "x": 3, "y": 0, "horizontal": false}, {"word": "bowl", "x": 7, "y": 5, "horizontal": false}, {"word": "glass", "x": 4, "y": 0, "horizontal": false}];
