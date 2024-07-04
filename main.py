@@ -41,6 +41,7 @@ class IntersectionOptions:
 class CrosswordOptions:
     max_skewness: float = None
     min_isolated_component_size: int = 2
+    allowed_intersection_types: list[IntersectionType] = None
     min_words_with_many_intersections: IntersectionOptions = None
     forbidden_cells: list[tuple[int, int]] = None
     required_placements: list[WordPlacement] = None
@@ -360,10 +361,13 @@ def make_problem(
             vpool=id_pool).clauses
                        )
 
+    if options.allowed_intersection_types is None:
+        options.allowed_intersection_types = [IntersectionType.CROSSING, IntersectionType.HORIZONTAL_OVERLAP,
+         IntersectionType.VERTICAL_OVERLAP]
+
     clause_list, intersection_vars = generate_crossing_constraints(
         words, is_in_hor_mode, is_x_coord, is_y_coord,
-        allowed_intersection_types=[IntersectionType.CROSSING, IntersectionType.HORIZONTAL_OVERLAP,
-                                    IntersectionType.VERTICAL_OVERLAP],
+        allowed_intersection_types=options.allowed_intersection_types,
         forbidden_crossings=options.forbidden_crossings,
         register_intersections=True,
         vpool=id_pool
@@ -529,19 +533,22 @@ def test():
 
     stats = {}
 
-    for size in range(16, 20):
+    for size in range(12, 13):
+        x_bound = size
+        y_bound = size
         stats[size] = {}
         stage_1_start = datetime.now()
         print("Generating clauses...")
         clauses, words_extended, is_in_hor_mode, is_placed, is_x_coord, is_y_coord = make_problem(
-            words, size, size,
-            # CrosswordOptions(
-            #     min_isolated_component_size=4
-            # )
+            words, x_bound, y_bound,
+            CrosswordOptions(
+                min_isolated_component_size=4,
+                allowed_intersection_types=[IntersectionType.CROSSING]
+            )
         )
         stage_2_start = datetime.now()
         print("Clause generation took ", (stage_2_start - stage_1_start).total_seconds(), "s")
-        for solver in (MinisatGH,):
+        for solver in (Mergesat3,):
             print("Solving with", solver.__name__)
             stage_2_start = datetime.now()
             placement_data = solve_problem(clauses, words_extended, is_in_hor_mode, is_placed, is_x_coord, is_y_coord, solver)
@@ -552,9 +559,9 @@ def test():
 
     print(json.dumps(stats, indent=2))
 
-    # print("Solution:")
-    # print_solution(placement_data, x_bound, y_bound)
-    # save_solution(placement_data, words_with_hints)
+    print("Solution:")
+    print_solution(placement_data, x_bound, y_bound)
+    save_solution(placement_data, words_with_hints)
 
 
 if __name__ == '__main__':
