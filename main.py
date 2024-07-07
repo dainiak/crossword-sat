@@ -12,9 +12,9 @@ from pysat.formula import IDPool
 from pysat.solvers import Mergesat3
 from pysat.solvers import Glucose4
 from pysat.solvers import MinisatGH
-# from pysat.solvers import CryptoMinisat
-# from pysat.solvers import Lingeling
-# from pysat.solvers import MapleChrono
+from pysat.solvers import CryptoMinisat
+from pysat.solvers import Lingeling
+from pysat.solvers import MapleChrono, MapleCM
 
 
 class IntersectionType(IntEnum):
@@ -190,9 +190,8 @@ def gen_conjunction(target, literals):
     yield from ([-target, v] for v in literals)
 
 
-def bound_isolated_component_size(words, intersections_per_word, min_component_size, required_crossings: list[tuple[str,str]], vpool: IDPool):
+def bound_isolated_component_size(words, intersections_per_word, min_component_size, required_crossings: list[tuple[str, str]], vpool: IDPool):
     n_unique_words = len(words) // 2
-    min_component_size = min(min_component_size, n_unique_words // 2 + 1)
     intersections_per_word = [set(intersections_per_word[iw]) | set(intersections_per_word[iw + n_unique_words]) for iw in range(n_unique_words)]
     pairwise_intersection_vars = [[set() for _ in range(n_unique_words)] for __ in range(n_unique_words)]
     for iw1, iw2 in combinations(range(n_unique_words), 2):
@@ -206,6 +205,8 @@ def bound_isolated_component_size(words, intersections_per_word, min_component_s
     if not min_component_size or min_component_size <= 1 or n_unique_words < 2:
         yield from ()
         return
+
+    min_component_size = min(min_component_size, n_unique_words // 2 + 1)
 
     if min_component_size == 2:
         yield from (list(intersections) for intersections in intersections_per_word)
@@ -221,24 +222,28 @@ def bound_isolated_component_size(words, intersections_per_word, min_component_s
         yield from gen_disjunction(intersection_iw1_iw2, pairwise_intersection_vars[iw1][iw2])
 
     # ruling out singleton words via constraints on cumulative variables
-    yield from (
-        [cumulative_pairwise_intersection_vars[iw1][iw2] for iw2 in range(n_unique_words) if
-         cumulative_pairwise_intersection_vars[iw1][iw2] is not None]
-        for iw1 in range(n_unique_words)
-    )
+    for iw1 in range(n_unique_words):
+        exists_neighbour_constraint = [
+            cumulative_pairwise_intersection_vars[iw1][iw2]
+            for iw2 in range(n_unique_words)
+            if cumulative_pairwise_intersection_vars[iw1][iw2] is not None
+        ]
+        if exists_neighbour_constraint:
+            yield exists_neighbour_constraint
 
     # ruling out isolated components of size = 2
     for iw1, iw2 in combinations(range(n_unique_words), 2):
         if cumulative_pairwise_intersection_vars[iw1][iw2] is None:
             continue
-        x = [-cumulative_pairwise_intersection_vars[iw1][iw2]]
-        for iw in (iw1, iw2):
-            x.extend(
-                cumulative_pairwise_intersection_vars[iw][jw]
-                for jw in range(n_unique_words)
-                if jw != iw1 and jw != iw2 and cumulative_pairwise_intersection_vars[iw][jw] is not None
-            )
-        yield x
+        x = [
+            cumulative_pairwise_intersection_vars[iw][jw]
+            for iw in (iw1, iw2)
+            for jw in range(n_unique_words)
+            if jw not in (iw1, iw2) and cumulative_pairwise_intersection_vars[iw][jw] is not None
+        ]
+        if x:
+            x.append(-cumulative_pairwise_intersection_vars[iw1][iw2])
+            yield x
 
     # ruling out isolated components of size = 3 or larger, but not in case of total connectivity constraint
     if 4 <= min_component_size <= n_unique_words // 2:
@@ -254,26 +259,87 @@ def bound_isolated_component_size(words, intersections_per_word, min_component_s
     if min_component_size <= max(3, n_unique_words // 2):
         return
 
-    # total connectivity case
-    max_distance = n_unique_words
-    reachability_vars = [[vpool.id() for _ in range(n_unique_words)] for __ in range(max_distance)]
-    yield [reachability_vars[0][0]]
-    yield from ([-reachability_vars[0][v]] for v in range(1, len(reachability_vars[0])))
-    yield from ([-reachability_vars[d][0]] for d in range(1, max_distance))
-    yield from ([reachability_vars[-1][v]] for v in range(1, len(reachability_vars[0])))
+    # total connectivity case below
+    # check if all nodes of the graph are at most max_distance away from the starting_node
+    def reachability_constraints(starting_node, max_distance, reachability_flag_var=None):
+        nonlocal n_unique_words, cumulative_pairwise_intersection_vars, vpool
+        reachability_vars = [[vpool.id() for _ in range(n_unique_words)] for __ in range(max_distance+1)]
 
-    products_ijj: Any = [[[None] * n_unique_words for _ in range(n_unique_words)] for d in range(max_distance)]
-    for d in range(1, max_distance):
-        for i in range(1, n_unique_words):
-            for j in range(n_unique_words):
-                if cumulative_pairwise_intersection_vars[i][j] is None:
+        yield [reachability_vars[0][starting_node]]
+        yield from ([-reachability_vars[0][node]] for node in range(len(reachability_vars[0])) if node != starting_node)
+        yield from ([-reachability_vars[distance][starting_node]] for distance in range(1, max_distance+1))
+        if reachability_flag_var is None:
+            yield from ([reachability_vars[-1][node]] for node in range(len(reachability_vars[0])) if node != starting_node)
+        else:
+            yield from gen_conjunction(
+                reachability_flag_var,
+                [reachability_vars[-1][node] for node in range(len(reachability_vars[0])) if node != starting_node]
+            )
+
+        products_ijj: Any = [[[None] * n_unique_words for _ in range(n_unique_words)] for __ in range(max_distance+1)]
+        for d in range(1, max_distance+1):
+            for i in range(n_unique_words):
+                if i == starting_node:
                     continue
-                products_ijj[d][i][j] = vpool.id()
-                yield from gen_conjunction(products_ijj[d][i][j], [reachability_vars[d - 1][j],
-                                                                   cumulative_pairwise_intersection_vars[i][j]])
-            yield from gen_disjunction(reachability_vars[d][i],
-                                       [products_ijj[d][i][j] for j in range(n_unique_words) if
-                                        products_ijj[d][i][j] is not None] + [reachability_vars[d - 1][i]])
+                for j in range(n_unique_words):
+                    if cumulative_pairwise_intersection_vars[i][j] is None:
+                        continue
+                    products_ijj[d][i][j] = vpool.id()
+                    yield from gen_conjunction(
+                        products_ijj[d][i][j],
+                        [reachability_vars[d - 1][j], cumulative_pairwise_intersection_vars[i][j]]
+                    )
+                yield from gen_disjunction(
+                    reachability_vars[d][i],
+                    [products_ijj[d][i][j] for j in range(n_unique_words) if products_ijj[d][i][j] is not None] + [reachability_vars[d - 1][i]]
+                )
+
+    def reachability_2():
+        nonlocal vpool, n_unique_words, cumulative_pairwise_intersection_vars
+        reachability_vars = cumulative_pairwise_intersection_vars
+        max_distance = n_unique_words - 1
+        for stage in range(n_unique_words):
+            max_distance = (max_distance + 1) // 2
+
+            reachability_2_vars: Any = [[None] * n_unique_words for _ in range(n_unique_words)]
+            for iw1, iw2 in combinations(range(n_unique_words), 2):
+                common_neighbours = [reachability_vars[iw1][iw2]] if reachability_vars[iw1][iw2] is not None else []
+                for iw in set(range(n_unique_words)) - {iw1, iw2}:
+                    if reachability_vars[iw1][iw] is not None and reachability_vars[iw2][iw] is not None:
+                        common_neighbours.append(vpool.id())
+                        yield from gen_conjunction(
+                            common_neighbours[-1],
+                            [reachability_vars[iw1][iw], reachability_vars[iw2][iw]]
+                        )
+                if common_neighbours:
+                    if max_distance > 1:
+                        reachability_2_vars[iw1][iw2] = vpool.id()
+                        reachability_2_vars[iw2][iw1] = reachability_2_vars[iw1][iw2]
+                        yield from gen_disjunction(reachability_2_vars[iw1][iw2], common_neighbours)
+                    else:
+                        yield common_neighbours
+
+            if max_distance > 1:
+                reachability_vars = reachability_2_vars
+                continue
+
+            yield from (
+                [reachability_2_vars[iw1][iw2]]
+                for iw1, iw2 in combinations(range(n_unique_words), 2)
+                if reachability_2_vars[iw1][iw2] is not None
+            )
+            break
+
+    yield from reachability_2()
+
+    # yield from reachability_constraints(node, 4)
+    # yield from reachability_constraints(0, n_unique_words - 1)
+    #
+    # reachability_flag_vars = [vpool.id() for _ in range(n_unique_words)]
+    # yield reachability_flag_vars
+    # for node in range(0, n_unique_words):
+    #     yield from reachability_constraints(node, 4, reachability_flag_vars[node])
+    #     yield from reachability_constraints(node, n_unique_words - 1)
 
 
 def require_placements(words, is_in_hor_mode, is_x_coord, is_y_coord, is_placed,
@@ -403,7 +469,7 @@ def make_problem(
             ).clauses
         )
 
-    clauses.extend(ensure_nonempty_first_row_and_column(is_x_coord, is_y_coord))
+    # clauses.extend(ensure_nonempty_first_row_and_column(is_x_coord, is_y_coord))
     clauses.extend(ensure_exactly_one_word_placement(words, is_in_hor_mode, is_x_coord, is_y_coord, is_placed))
     clauses.extend(forbid_cells(words, is_in_hor_mode, is_x_coord, is_y_coord, options.forbidden_cells))
     clauses.extend(require_placements(words, is_in_hor_mode, is_x_coord, is_y_coord, is_placed, options.required_placements))
@@ -511,7 +577,7 @@ def test():
        {"word": "scissors", "hint": "We use these to cut paper, but not for food; they're kitchen scissors."},
        {"word": "thermometer", "hint": "A tool that tells us how hot our cooked meat is before we eat it."},
     ]
-    words_with_hints = [    {"word": "elephant", "hint": "A large animal with a trunk and big ears, known for its memory."},    {"word": "giraffe", "hint": "This animal has a very long neck and eats leaves from tall trees."},    {"word": "tiger", "hint": "A big cat with orange fur and black stripes, known for its strength."},    {"word": "zebra", "hint": "A horse-like animal with distinctive black and white stripes."},    {"word": "kangaroo", "hint": "An Australian animal that hops and carries its baby in a pouch."},    {"word": "penguin", "hint": "A flightless bird that swims in cold water and has a tuxedo-like appearance."},    {"word": "lion", "hint": "Known as the king of the jungle, this big cat has a majestic mane."},    {"word": "monkey", "hint": "A playful animal that loves to swing from tree branches."},    {"word": "bear", "hint": "A large, strong animal that can be brown, black, or white; often found in forests."},    {"word": "rabbit", "hint": "A small, furry animal with long ears that loves to hop and eat carrots."},    {"word": "ant", "hint": "A tiny insect that lives in colonies and works hard to collect food."},    {"word": "rat", "hint": "A small rodent with a long tail, often found in urban areas."},    {"word": "bee", "hint": "An insect that makes honey and is known for its buzzing sound."},    {"word": "turtle", "hint": "A slow-moving reptile with a hard shell that lives on land or in water."},    {"word": "frog", "hint": "An amphibian that hops and has smooth, moist skin."},    {"word": "duck", "hint": "A bird that swims in ponds and makes a quacking sound."},    {"word": "fish", "hint": "An aquatic animal that breathes through gills and swims with fins."},    {"word": "shark", "hint": "A large, predatory fish known for its sharp teeth and dorsal fin."},    {"word": "whale", "hint": "A massive marine mammal that can sing underwater and spouts water."},    {"word": "dolphin", "hint": "A friendly and intelligent marine mammal known for its playful behavior."},    {"word": "octopus", "hint": "A sea creature with eight arms and a soft, flexible body."},    {"word": "butterfly", "hint": "An insect with colorful wings that flies from flower to flower."},    {"word": "swan", "hint": "A graceful bird with a long neck that glides on water."},    {"word": "eagle", "hint": "A powerful bird of prey with sharp talons and excellent vision."},    {"word": "owl", "hint": "A nocturnal bird with big eyes and a hooting call."},    {"word": "parrot", "hint": "A colorful bird known for its ability to mimic human speech."},    {"word": "bat", "hint": "A nocturnal mammal that can fly and uses echolocation to navigate."}]
+    # words_with_hints = [    {"word": "elephant", "hint": "A large animal with a trunk and big ears, known for its memory."},    {"word": "giraffe", "hint": "This animal has a very long neck and eats leaves from tall trees."},    {"word": "tiger", "hint": "A big cat with orange fur and black stripes, known for its strength."},    {"word": "zebra", "hint": "A horse-like animal with distinctive black and white stripes."},    {"word": "kangaroo", "hint": "An Australian animal that hops and carries its baby in a pouch."},    {"word": "penguin", "hint": "A flightless bird that swims in cold water and has a tuxedo-like appearance."},    {"word": "lion", "hint": "Known as the king of the jungle, this big cat has a majestic mane."},    {"word": "monkey", "hint": "A playful animal that loves to swing from tree branches."},    {"word": "bear", "hint": "A large, strong animal that can be brown, black, or white; often found in forests."},    {"word": "rabbit", "hint": "A small, furry animal with long ears that loves to hop and eat carrots."},    {"word": "ant", "hint": "A tiny insect that lives in colonies and works hard to collect food."},    {"word": "rat", "hint": "A small rodent with a long tail, often found in urban areas."},    {"word": "bee", "hint": "An insect that makes honey and is known for its buzzing sound."},    {"word": "turtle", "hint": "A slow-moving reptile with a hard shell that lives on land or in water."},    {"word": "frog", "hint": "An amphibian that hops and has smooth, moist skin."},    {"word": "duck", "hint": "A bird that swims in ponds and makes a quacking sound."},    {"word": "fish", "hint": "An aquatic animal that breathes through gills and swims with fins."},    {"word": "shark", "hint": "A large, predatory fish known for its sharp teeth and dorsal fin."},    {"word": "whale", "hint": "A massive marine mammal that can sing underwater and spouts water."},    {"word": "dolphin", "hint": "A friendly and intelligent marine mammal known for its playful behavior."},    {"word": "octopus", "hint": "A sea creature with eight arms and a soft, flexible body."},    {"word": "butterfly", "hint": "An insect with colorful wings that flies from flower to flower."},    {"word": "swan", "hint": "A graceful bird with a long neck that glides on water."},    {"word": "eagle", "hint": "A powerful bird of prey with sharp talons and excellent vision."},    {"word": "owl", "hint": "A nocturnal bird with big eyes and a hooting call."},    {"word": "parrot", "hint": "A colorful bird known for its ability to mimic human speech."},    {"word": "bat", "hint": "A nocturnal mammal that can fly and uses echolocation to navigate."}]
 
 
     words = [w["word"].lower() for w in words_with_hints]
@@ -533,7 +599,7 @@ def test():
 
     stats = {}
 
-    for size in range(12, 13):
+    for size in range(14, 13, -1):
         x_bound = size
         y_bound = size
         stats[size] = {}
@@ -542,13 +608,14 @@ def test():
         clauses, words_extended, is_in_hor_mode, is_placed, is_x_coord, is_y_coord = make_problem(
             words, x_bound, y_bound,
             CrosswordOptions(
-                min_isolated_component_size=4,
+                min_isolated_component_size=19,
                 allowed_intersection_types=[IntersectionType.CROSSING]
             )
         )
         stage_2_start = datetime.now()
         print("Clause generation took ", (stage_2_start - stage_1_start).total_seconds(), "s")
-        for solver in (Mergesat3,):
+        print("Number of clauses: ", len(clauses))
+        for solver in (MinisatGH, ): #, Glucose4, MinisatGH,Mergesat3,
             print("Solving with", solver.__name__)
             stage_2_start = datetime.now()
             placement_data = solve_problem(clauses, words_extended, is_in_hor_mode, is_placed, is_x_coord, is_y_coord, solver)
@@ -557,11 +624,12 @@ def test():
             stats[size][solver.__name__] = elapsed_time
             print("Solving took ", elapsed_time, "s")
 
+        print("Solution:")
+        print_solution(placement_data, x_bound, y_bound)
+
     print(json.dumps(stats, indent=2))
 
-    print("Solution:")
-    print_solution(placement_data, x_bound, y_bound)
-    save_solution(placement_data, words_with_hints)
+    # save_solution(placement_data, words_with_hints)
 
 
 if __name__ == '__main__':
