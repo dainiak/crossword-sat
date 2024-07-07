@@ -142,6 +142,100 @@ def generate_crossing_constraints(
     return clause_list, intersections_per_word
 
 
+def compatibility_check(w1, is_hor_1, w2, is_hor_2, dx, dy):
+    if is_hor_1 == is_hor_2:
+        dc, dco = (dx, dy) if is_hor_1 else (dy, dx)
+        if dco != 0 or dc <= - len(w1) or dc >= len(w2):
+            return True, None
+        if dc >= 0:
+            dc, w1, w2 = -dc, w2, w1
+        return w1[-dc:len(w2) - dc] == w2[:min(len(w2), len(w1) + dc)], (IntersectionType.HORIZONTAL_OVERLAP if is_hor_1 else IntersectionType.VERTICAL_OVERLAP)
+
+    if not is_hor_1:
+        dx, dy = dy, dx
+    if dy < 0 or dy >= len(w2) or dx > 0 or dx <= -len(w1):
+        return True, None
+    return w1[-dx] == w2[dy], IntersectionType.CROSSING
+
+
+def generate_crossing_constraints_alternative(
+        words, x_bound, y_bound, possible_placements,
+        allowed_intersection_types: Iterable[IntersectionType] = None,
+        forbidden_crossings: list[tuple[str, str]] = None,
+        pairwise_intersection_vars=None,
+        vpool: IDPool = None):
+    if pairwise_intersection_vars is not None and vpool is None:
+        raise ValueError("vpool must be provided if register_intersections is True")
+    if allowed_intersection_types is None:
+        allowed_intersection_types = (IntersectionType.HORIZONTAL_OVERLAP, IntersectionType.VERTICAL_OVERLAP, IntersectionType.CROSSING)
+
+    forbidden_crossings = set(forbidden_crossings) if forbidden_crossings else set()
+    registered_intersections = set()
+
+    # x_cache = tuple(
+    #     tuple(
+    #         tuple(
+    #             []
+    #         )
+    #         for is_hor in (0, 1)
+    #     )
+    #     for _ in words
+    # )
+    # y_cache = tuple(
+    #     tuple(
+    #         []
+    #         for is_hor in (0, 1)
+    #     )
+    #     for _ in words
+    # )
+
+    for iw in range(len(words)):
+        for x, y, is_hor, v in possible_placements[iw]:
+            x_cache[iw][is_hor].append(v)
+            y_cache[iw][is_hor].append((x, y, is_hor, v))
+
+
+    for (iw1, w1), (iw2, w2) in combinations(enumerate(words), 2):
+        compatibility_cache = tuple(
+            tuple(
+                tuple(
+                    tuple(compatibility_check(w1, is_hor_1, w2, is_hor_2, dx, dy) for is_hor_2 in (0, 1))
+                    for is_hor_1 in (0, 1)
+                )
+                for dy in range(-y_bound + 1, y_bound)
+            )
+            for dx in range(-x_bound + 1, x_bound)
+        )
+
+        compatibility_clauses = {}
+        for x1, y1, is_hor_1, v1 in possible_placements[iw1]:
+            if v1 not in compatibility_clauses:
+                compatibility_clauses[v1] = [-v1]
+            for x2, y2, is_hor_2, v2 in possible_placements[iw2]:
+                if v2 not in compatibility_clauses:
+                    compatibility_clauses[v2] = [-v2]
+
+                # are_compatible, intersection_type = compatibility_check(w1, is_hor_1, w2, is_hor_2, x1 - x2, y1 - y2)
+                are_compatible, intersection_type = compatibility_cache[x1-x2+x_bound-1][y1-y2+y_bound-1][is_hor_1][is_hor_2]
+
+                can_coexist = are_compatible and (
+                    intersection_type is None
+                    or (w1, w2) not in forbidden_crossings and intersection_type in allowed_intersection_types
+                )
+                if can_coexist:
+                    compatibility_clauses[v1].append(v2)
+                    compatibility_clauses[v2].append(v1)
+                    if intersection_type is not None and pairwise_intersection_vars is not None and (v1, v2) not in registered_intersections and (v2, v1) not in registered_intersections:
+                        registered_intersections.add((v1, v2))
+                        registered_intersections.add((v2, v1))
+                        new_var = vpool.id()
+                        yield from gen_conjunction(new_var, [v1, v2])
+                        pairwise_intersection_vars[iw1][iw2].append(new_var)
+                else:
+                    yield [-v1, -v2]
+        yield from compatibility_clauses.values()
+
+
 def ensure_nonempty_first_row_and_column(is_x_coord, is_y_coord):
     return [
         [var_list[0] for var_list in is_x_coord if var_list],
@@ -176,32 +270,25 @@ def forbid_cells(words, is_in_hor_mode, is_x_coord, is_y_coord, forbidden_cells:
             yield [-other_coord_list[c], -fixed_coord_var]
 
 
-def gen_disjunction(target, literals):
-    x = list(literals)
-    x.append(-target)
-    yield x
-    yield from ([target, -v] for v in literals)
+def gen_disjunction(target, literals, one_way_implications=False):
+    yield [-target, *literals]
+    if not one_way_implications:
+        yield from ([target, -v] for v in literals)
 
 
 def gen_conjunction(target, literals):
-    x = [-v for v in literals]
-    x.append(target)
-    yield x
+    yield [target, *(-v for v in literals)]
     yield from ([-target, v] for v in literals)
 
 
-def bound_isolated_component_size(words, intersections_per_word, min_component_size, required_crossings: list[tuple[str, str]], vpool: IDPool):
-    n_unique_words = len(words) // 2
-    intersections_per_word = [set(intersections_per_word[iw]) | set(intersections_per_word[iw + n_unique_words]) for iw in range(n_unique_words)]
-    pairwise_intersection_vars = [[set() for _ in range(n_unique_words)] for __ in range(n_unique_words)]
-    for iw1, iw2 in combinations(range(n_unique_words), 2):
-        pairwise_intersection_vars[iw1][iw2] = intersections_per_word[iw1] & intersections_per_word[iw2]
-        pairwise_intersection_vars[iw2][iw1] = pairwise_intersection_vars[iw1][iw2]
+def gen_uniqueness(literals):
+    yield from ([-u, -v] for u, v in combinations(literals, 2))
+    yield list(literals)
 
-    if required_crossings:
-        for w1, w2 in required_crossings:
-            yield list(pairwise_intersection_vars[words.index(w1)][words.index(w2)])
 
+def bound_isolated_component_size(pairwise_intersection_vars, min_component_size, vpool: IDPool):
+    one_way_implications = False
+    n_unique_words = len(pairwise_intersection_vars)
     if not min_component_size or min_component_size <= 1 or n_unique_words < 2:
         yield from ()
         return
@@ -209,7 +296,7 @@ def bound_isolated_component_size(words, intersections_per_word, min_component_s
     min_component_size = min(min_component_size, n_unique_words // 2 + 1)
 
     if min_component_size == 2:
-        yield from (list(intersections) for intersections in intersections_per_word)
+        yield from ([v for vars in word_var_lists for v in vars] for word_var_lists in pairwise_intersection_vars)
         return
 
     cumulative_pairwise_intersection_vars: Any = [[None] * n_unique_words for _ in range(n_unique_words)]
@@ -219,7 +306,7 @@ def bound_isolated_component_size(words, intersections_per_word, min_component_s
         intersection_iw1_iw2 = vpool.id()
         cumulative_pairwise_intersection_vars[iw1][iw2] = intersection_iw1_iw2
         cumulative_pairwise_intersection_vars[iw2][iw1] = intersection_iw1_iw2
-        yield from gen_disjunction(intersection_iw1_iw2, pairwise_intersection_vars[iw1][iw2])
+        yield from gen_disjunction(intersection_iw1_iw2, pairwise_intersection_vars[iw1][iw2], one_way_implications)
 
     # ruling out singleton words via constraints on cumulative variables
     for iw1 in range(n_unique_words):
@@ -291,11 +378,12 @@ def bound_isolated_component_size(words, intersections_per_word, min_component_s
                     )
                 yield from gen_disjunction(
                     reachability_vars[d][i],
-                    [products_ijj[d][i][j] for j in range(n_unique_words) if products_ijj[d][i][j] is not None] + [reachability_vars[d - 1][i]]
+                    [products_ijj[d][i][j] for j in range(n_unique_words) if products_ijj[d][i][j] is not None] + [reachability_vars[d - 1][i]],
+                    one_way_implications
                 )
 
     def reachability_2():
-        nonlocal vpool, n_unique_words, cumulative_pairwise_intersection_vars
+        nonlocal vpool, n_unique_words, cumulative_pairwise_intersection_vars, one_way_implications
         reachability_vars = cumulative_pairwise_intersection_vars
         max_distance = n_unique_words - 1
         for stage in range(n_unique_words):
@@ -315,7 +403,7 @@ def bound_isolated_component_size(words, intersections_per_word, min_component_s
                     if max_distance > 1:
                         reachability_2_vars[iw1][iw2] = vpool.id()
                         reachability_2_vars[iw2][iw1] = reachability_2_vars[iw1][iw2]
-                        yield from gen_disjunction(reachability_2_vars[iw1][iw2], common_neighbours)
+                        yield from gen_disjunction(reachability_2_vars[iw1][iw2], common_neighbours, one_way_implications)
                     else:
                         yield common_neighbours
 
@@ -379,8 +467,47 @@ def guaranteed_infeasible(words, x_bound, y_bound):
     return (
         x_bound < 1 or y_bound < 1
         or sum(map(len, words)) > 2 * x_bound * y_bound
-        or any(len(word) > x_bound and len(word) > y_bound for word in words)
+        or any(len(word) > max(x_bound, y_bound) for word in words)
     )
+
+
+def make_problem_alternative(
+        words,
+        x_bound,
+        y_bound,
+        options: CrosswordOptions = None
+):
+    if guaranteed_infeasible(words, x_bound, y_bound):
+        return [], [], [], [], [], []
+    if options is None:
+        options = CrosswordOptions()
+
+    id_pool = IDPool()
+    clauses = []
+    possible_placements = [[] for _ in words]
+    for iw, w in enumerate(words):
+        for is_horizontal in (True, False):
+            for x in range(x_bound - ((len(w) - 1) if is_horizontal else 0)):
+                for y in range(y_bound - ((len(w) - 1) if not is_horizontal else 0)):
+                    possible_placements[iw].append((x, y, is_horizontal, id_pool.id()))
+        clauses.extend(gen_uniqueness(list(v for _, _, _, v in possible_placements[iw])))
+    pairwise_intersection_vars = [[[] for _ in words] for __ in words]
+    for iw1, iw2 in combinations(range(len(words)), 2):
+        pairwise_intersection_vars[iw2][iw1] = pairwise_intersection_vars[iw1][iw2]
+    clauses.extend(generate_crossing_constraints_alternative(
+        words, x_bound, y_bound, possible_placements,
+        allowed_intersection_types=options.allowed_intersection_types,
+        forbidden_crossings=options.forbidden_crossings,
+        pairwise_intersection_vars=pairwise_intersection_vars,
+        vpool=id_pool
+    ))
+    clauses.extend(bound_isolated_component_size(
+        pairwise_intersection_vars,
+        options.min_isolated_component_size,
+        vpool=id_pool
+    ))
+
+    return list(set(map(tuple, map(sorted, clauses)))), words, possible_placements
 
 
 def make_problem(
@@ -431,7 +558,7 @@ def make_problem(
         options.allowed_intersection_types = [IntersectionType.CROSSING, IntersectionType.HORIZONTAL_OVERLAP,
          IntersectionType.VERTICAL_OVERLAP]
 
-    clause_list, intersection_vars = generate_crossing_constraints(
+    clause_list, intersections_per_word = generate_crossing_constraints(
         words, is_in_hor_mode, is_x_coord, is_y_coord,
         allowed_intersection_types=options.allowed_intersection_types,
         forbidden_crossings=options.forbidden_crossings,
@@ -440,34 +567,43 @@ def make_problem(
     )
     clauses.extend(clause_list)
 
+    intersections_per_word = [set(intersections_per_word[iw]) | set(intersections_per_word[iw + n_original_words]) for iw
+                              in range(n_original_words)]
+    pairwise_intersection_vars = [[set() for _ in range(n_original_words)] for __ in range(n_original_words)]
+    for iw1, iw2 in combinations(range(n_original_words), 2):
+        pairwise_intersection_vars[iw1][iw2] = intersections_per_word[iw1] & intersections_per_word[iw2]
+        pairwise_intersection_vars[iw2][iw1] = pairwise_intersection_vars[iw1][iw2]
+
+    if options.required_crossings:
+        for w1, w2 in options.required_crossings:
+            clauses.append(list(pairwise_intersection_vars[words.index(w1)][words.index(w2)]))
+
     clauses.extend(bound_isolated_component_size(
-        words,
-        intersection_vars,
+        pairwise_intersection_vars,
         options.min_isolated_component_size,
-        options.required_crossings,
         vpool=id_pool
     ))
 
-    if options.min_words_with_many_intersections is not None:
-        new_vars = [id_pool.id() for _ in words]
-        clauses.extend(
-            clause + [-new_vars[iw]]
-            for iw, lits in enumerate(intersection_vars)
-            for clause in pysat_card.CardEnc.atleast(
-                lits=lits,
-                bound=options.min_words_with_many_intersections.intersections_bound,
-                encoding=pysat_card.EncType.seqcounter,
-                vpool=id_pool
-            ).clauses
-        )
-        clauses.extend(
-            pysat_card.CardEnc.atleast(
-                lits=new_vars,
-                bound=options.min_words_with_many_intersections.qty_bound,
-                encoding=pysat_card.EncType.seqcounter,
-                vpool=id_pool
-            ).clauses
-        )
+    # if options.min_words_with_many_intersections is not None:
+    #     new_vars = [id_pool.id() for _ in words]
+    #     clauses.extend(
+    #         clause + [-new_vars[iw]]
+    #         for iw, lits in enumerate(intersection_vars)
+    #         for clause in pysat_card.CardEnc.atleast(
+    #             lits=lits,
+    #             bound=options.min_words_with_many_intersections.intersections_bound,
+    #             encoding=pysat_card.EncType.seqcounter,
+    #             vpool=id_pool
+    #         ).clauses
+    #     )
+    #     clauses.extend(
+    #         pysat_card.CardEnc.atleast(
+    #             lits=new_vars,
+    #             bound=options.min_words_with_many_intersections.qty_bound,
+    #             encoding=pysat_card.EncType.seqcounter,
+    #             vpool=id_pool
+    #         ).clauses
+    #     )
 
     # clauses.extend(ensure_nonempty_first_row_and_column(is_x_coord, is_y_coord))
     clauses.extend(ensure_exactly_one_word_placement(words, is_in_hor_mode, is_x_coord, is_y_coord, is_placed))
@@ -497,6 +633,24 @@ def solve_problem(clauses, words, is_in_hor_mode, is_placed, is_x_coord, is_y_co
             )
             for iw, w in enumerate(words) if is_placed[iw] in model
         ]
+
+
+def solve_problem_alternative(clauses, words, possible_placements, SatSolver):
+    with SatSolver() as solver:
+        for clause in clauses:
+            solver.add_clause(clause)
+
+        if not solver.solve():
+            return []
+
+        model = solver.get_model()
+        result = []
+        for iw, w in enumerate(words):
+            for x, y, is_horizontal, v in possible_placements[iw]:
+                if v in model:
+                    result.append(WordPlacement(word=w, x=x, y=y, horizontal=is_horizontal))
+                    break
+        return result
 
 
 def print_solution(placement_data: list[WordPlacement], x_bound, y_bound):
@@ -582,10 +736,10 @@ def test():
 
     words = [w["word"].lower() for w in words_with_hints]
 
-    # words = [
-    #     "elephant", "giraffe", "tiger", "zebra", "kangaroo", "penguin", "lion", "monkey", "bear", "rabbit", "ant", "rat", "bee",
-    #     "turtle", "frog", "duck", "fish", "shark", "whale", "dolphin", "octopus", "butterfly", "swan", "eagle", "owl", "parrot", "bat"
-    # ]
+    words = [
+        "elephant", "giraffe", "tiger", "zebra", "kangaroo", "penguin", "lion", "monkey", "bear", "rabbit", "ant", "rat", "bee",
+        "turtle", "frog", "duck", "fish", "shark", "whale", "dolphin", "octopus", "butterfly", "swan", "eagle", "owl", "parrot", "bat"
+    ]
 
     # possible for total connectivity,
     # x_bound, y_bound = 18, 11
@@ -597,35 +751,49 @@ def test():
     # var placement_data = [{"word": "elephant", "x": 1, "y": 11, "horizontal": true}, {"word": "giraffe", "x": 1, "y": 1, "horizontal": true}, {"word": "tiger", "x": 1, "y": 8, "horizontal": true}, {"word": "bear", "x": 1, "y": 9, "horizontal": true}, {"word": "rabbit", "x": 4, "y": 9, "horizontal": true}, {"word": "ant", "x": 6, "y": 11, "horizontal": true}, {"word": "frog", "x": 7, "y": 3, "horizontal": true}, {"word": "duck", "x": 8, "y": 8, "horizontal": true}, {"word": "whale", "x": 1, "y": 4, "horizontal": true}, {"word": "dolphin", "x": 0, "y": 0, "horizontal": true}, {"word": "butterfly", "x": 2, "y": 10, "horizontal": true}, {"word": "eagle", "x": 1, "y": 7, "horizontal": true}, {"word": "parrot", "x": 0, "y": 5, "horizontal": true}, {"word": "bat", "x": 4, "y": 3, "horizontal": true}, {"word": "zebra", "x": 8, "y": 0, "horizontal": false}, {"word": "kangaroo", "x": 10, "y": 0, "horizontal": false}, {"word": "penguin", "x": 0, "y": 5, "horizontal": false}, {"word": "lion", "x": 2, "y": 0, "horizontal": false}, {"word": "monkey", "x": 11, "y": 5, "horizontal": false}, {"word": "rat", "x": 5, "y": 8, "horizontal": false}, {"word": "bee", "x": 1, "y": 9, "horizontal": false}, {"word": "turtle", "x": 6, "y": 3, "horizontal": false}, {"word": "fish", "x": 7, "y": 3, "horizontal": false}, {"word": "shark", "x": 3, "y": 2, "horizontal": false}, {"word": "octopus", "x": 9, "y": 0, "horizontal": false}, {"word": "swan", "x": 1, "y": 3, "horizontal": false}, {"word": "owl", "x": 4, "y": 5, "horizontal": false}];
     # var placement_data = [{"word": "street", "x": 5, "y": 10, "horizontal": true}, {"word": "bus", "x": 3, "y": 10, "horizontal": true}, {"word": "tree", "x": 6, "y": 10, "horizontal": true}, {"word": "garden", "x": 0, "y": 4, "horizontal": true}, {"word": "kitchen", "x": 0, "y": 1, "horizontal": true}, {"word": "bedroom", "x": 3, "y": 6, "horizontal": true}, {"word": "bathroom", "x": 1, "y": 2, "horizontal": true}, {"word": "playground", "x": 0, "y": 0, "horizontal": true}, {"word": "restaurant", "x": 0, "y": 9, "horizontal": true}, {"word": "bridge", "x": 0, "y": 5, "horizontal": true}, {"word": "museum", "x": 1, "y": 8, "horizontal": true}, {"word": "traffic", "x": 0, "y": 3, "horizontal": true}, {"word": "house", "x": 2, "y": 6, "horizontal": false}, {"word": "apartment", "x": 9, "y": 1, "horizontal": false}, {"word": "park", "x": 0, "y": 7, "horizontal": false}, {"word": "school", "x": 7, "y": 3, "horizontal": false}, {"word": "store", "x": 8, "y": 4, "horizontal": false}, {"word": "car", "x": 6, "y": 3, "horizontal": false}, {"word": "library", "x": 1, "y": 0, "horizontal": false}, {"word": "supermarket", "x": 10, "y": 0, "horizontal": false}];
 
-    stats = {}
+    stats = []
 
-    for size in range(14, 13, -1):
-        x_bound = size
-        y_bound = size
-        stats[size] = {}
-        stage_1_start = datetime.now()
-        print("Generating clauses...")
-        clauses, words_extended, is_in_hor_mode, is_placed, is_x_coord, is_y_coord = make_problem(
-            words, x_bound, y_bound,
-            CrosswordOptions(
-                min_isolated_component_size=19,
-                allowed_intersection_types=[IntersectionType.CROSSING]
-            )
-        )
-        stage_2_start = datetime.now()
-        print("Clause generation took ", (stage_2_start - stage_1_start).total_seconds(), "s")
-        print("Number of clauses: ", len(clauses))
-        for solver in (MinisatGH, ): #, Glucose4, MinisatGH,Mergesat3,
-            print("Solving with", solver.__name__)
+    for size in range(15, 14, -1):
+        for modeling_type in ("alternative", ):
+            x_bound = size
+            y_bound = size
+            stage_1_start = datetime.now()
+            print("Generating clauses...")
+            if modeling_type == "main":
+                clauses, words_extended, is_in_hor_mode, is_placed, is_x_coord, is_y_coord = make_problem(
+                    words, x_bound, y_bound,
+                    CrosswordOptions(
+                        min_isolated_component_size=19,
+                        allowed_intersection_types=[IntersectionType.CROSSING, IntersectionType.HORIZONTAL_OVERLAP, IntersectionType.VERTICAL_OVERLAP]
+                    )
+                )
+            else:
+                clauses, words, possible_placements = make_problem_alternative(
+                    words,
+                    x_bound,
+                    y_bound,
+                    CrosswordOptions(
+                           min_isolated_component_size=19,
+                           allowed_intersection_types=[IntersectionType.CROSSING, IntersectionType.HORIZONTAL_OVERLAP, IntersectionType.VERTICAL_OVERLAP]
+                       )
+                )
             stage_2_start = datetime.now()
-            placement_data = solve_problem(clauses, words_extended, is_in_hor_mode, is_placed, is_x_coord, is_y_coord, solver)
-            stage_3_start = datetime.now()
-            elapsed_time = (stage_3_start - stage_2_start).total_seconds()
-            stats[size][solver.__name__] = elapsed_time
-            print("Solving took ", elapsed_time, "s")
+            print("Clause generation took ", (stage_2_start - stage_1_start).total_seconds(), "s")
+            print("Number of clauses: ", len(clauses))
+            for solver in ( Mergesat3, ): # Glucose4, MinisatGH, MergeSat3
+                print("Solving with", solver.__name__)
+                stage_2_start = datetime.now()
+                if modeling_type == "main":
+                    placement_data = solve_problem(clauses, words_extended, is_in_hor_mode, is_placed, is_x_coord, is_y_coord, solver)
+                else:
+                    placement_data = solve_problem_alternative(clauses, words, possible_placements, solver)
+                stage_3_start = datetime.now()
+                elapsed_time = (stage_3_start - stage_2_start).total_seconds()
+                stats.append((modeling_type, len(words), size, solver.__name__, elapsed_time))
+                print("Solving took ", elapsed_time, "s")
 
-        print("Solution:")
-        print_solution(placement_data, x_bound, y_bound)
+            print("Solution:")
+            print_solution(placement_data, x_bound, y_bound)
 
     print(json.dumps(stats, indent=2))
 
