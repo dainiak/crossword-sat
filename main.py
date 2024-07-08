@@ -169,71 +169,72 @@ def generate_crossing_constraints_alternative(
     if allowed_intersection_types is None:
         allowed_intersection_types = (IntersectionType.HORIZONTAL_OVERLAP, IntersectionType.VERTICAL_OVERLAP, IntersectionType.CROSSING)
 
+    allowed_intersection_types = set(allowed_intersection_types) | {None}
     forbidden_crossings = set(forbidden_crossings) if forbidden_crossings else set()
     registered_intersections = set()
 
-    # x_cache = tuple(
-    #     tuple(
-    #         tuple(
-    #             []
-    #         )
-    #         for is_hor in (0, 1)
-    #     )
-    #     for _ in words
-    # )
-    # y_cache = tuple(
-    #     tuple(
-    #         []
-    #         for is_hor in (0, 1)
-    #     )
-    #     for _ in words
-    # )
+    v_cache = tuple(
+        tuple(
+            tuple(
+                [None] * (y_bound - ((len(w) - 1) if not is_hor else 0))
+                for _ in range(x_bound - ((len(w)-1) if is_hor else 0))
+            )
+            for is_hor in (0, 1)
+        )
+        for w in words
+    )
 
     for iw in range(len(words)):
         for x, y, is_hor, v in possible_placements[iw]:
-            x_cache[iw][is_hor].append(v)
-            y_cache[iw][is_hor].append((x, y, is_hor, v))
-
+            v_cache[iw][is_hor][x][y] = v
 
     for (iw1, w1), (iw2, w2) in combinations(enumerate(words), 2):
-        compatibility_cache = tuple(
-            tuple(
-                tuple(
-                    tuple(compatibility_check(w1, is_hor_1, w2, is_hor_2, dx, dy) for is_hor_2 in (0, 1))
-                    for is_hor_1 in (0, 1)
-                )
-                for dy in range(-y_bound + 1, y_bound)
-            )
-            for dx in range(-x_bound + 1, x_bound)
-        )
+        for is_hor_1, is_hor_2 in product((False, True), repeat=2):
+            cache_1 = v_cache[iw1][is_hor_1]
+            cache_2 = v_cache[iw2][is_hor_2]
 
-        compatibility_clauses = {}
-        for x1, y1, is_hor_1, v1 in possible_placements[iw1]:
-            if v1 not in compatibility_clauses:
-                compatibility_clauses[v1] = [-v1]
-            for x2, y2, is_hor_2, v2 in possible_placements[iw2]:
-                if v2 not in compatibility_clauses:
-                    compatibility_clauses[v2] = [-v2]
-
-                # are_compatible, intersection_type = compatibility_check(w1, is_hor_1, w2, is_hor_2, x1 - x2, y1 - y2)
-                are_compatible, intersection_type = compatibility_cache[x1-x2+x_bound-1][y1-y2+y_bound-1][is_hor_1][is_hor_2]
-
-                can_coexist = are_compatible and (
-                    intersection_type is None
-                    or (w1, w2) not in forbidden_crossings and intersection_type in allowed_intersection_types
-                )
-                if can_coexist:
-                    compatibility_clauses[v1].append(v2)
-                    compatibility_clauses[v2].append(v1)
-                    if intersection_type is not None and pairwise_intersection_vars is not None and (v1, v2) not in registered_intersections and (v2, v1) not in registered_intersections:
-                        registered_intersections.add((v1, v2))
-                        registered_intersections.add((v2, v1))
-                        new_var = vpool.id()
-                        yield from gen_conjunction(new_var, [v1, v2])
-                        pairwise_intersection_vars[iw1][iw2].append(new_var)
+            if is_hor_1 == is_hor_2:
+                if is_hor_1:
+                    for y in range(y_bound):
+                        for x1, x2 in product(range(x_bound - len(w1) + 1), range(x_bound - len(w2) + 1)):
+                            are_compatible, intersection_type = compatibility_check(w1, is_hor_1, w2, is_hor_2, x1 - x2, 0)
+                            if not are_compatible or intersection_type not in allowed_intersection_types or intersection_type is not None and (w1, w2) in forbidden_crossings:
+                                yield [-cache_1[x1][y], -cache_2[x2][y]]
+                            elif are_compatible and intersection_type is not None and (w1, w2) not in forbidden_crossings and pairwise_intersection_vars is not None:
+                                new_var = vpool.id()
+                                yield from gen_conjunction(new_var, [cache_1[x1][y], cache_2[x2][y]])
+                                pairwise_intersection_vars[iw1][iw2].append(new_var)
                 else:
-                    yield [-v1, -v2]
-        yield from compatibility_clauses.values()
+                    for x in range(x_bound):
+                        for y1, y2 in product(range(y_bound - len(w1) + 1), range(y_bound - len(w2) + 1)):
+                            are_compatible, intersection_type = compatibility_check(w1, is_hor_1, w2, is_hor_2, 0, y1 - y2)
+                            if not are_compatible or intersection_type not in allowed_intersection_types or intersection_type is not None and (w1, w2) in forbidden_crossings:
+                                yield [-cache_1[x][y1], -cache_2[x][y2]]
+                            elif are_compatible and intersection_type is not None and (w1, w2) not in forbidden_crossings and pairwise_intersection_vars is not None:
+                                new_var = vpool.id()
+                                yield from gen_conjunction(new_var, [cache_1[x][y1], cache_2[x][y2]])
+                                pairwise_intersection_vars[iw1][iw2].append(new_var)
+            else:
+                if is_hor_1:
+                    for x1, y1 in product(range(x_bound - len(w1) + 1), range(y_bound)):
+                        for x2, y2 in product(range(x1, x1 + len(w1)), range(max(0, y1 - len(w2) + 1), min(y1 + 1, y_bound - len(w2) + 1))):
+                            are_compatible, intersection_type = compatibility_check(w1, is_hor_1, w2, is_hor_2, x1 - x2, y1 - y2)
+                            if not are_compatible or intersection_type not in allowed_intersection_types or intersection_type is not None and (w1, w2) in forbidden_crossings:
+                                yield [-cache_1[x1][y1], -cache_2[x2][y2]]
+                            elif are_compatible and intersection_type is not None and (w1, w2) not in forbidden_crossings and pairwise_intersection_vars is not None:
+                                new_var = vpool.id()
+                                yield from gen_conjunction(new_var, [cache_1[x1][y1], cache_2[x2][y2]])
+                                pairwise_intersection_vars[iw1][iw2].append(new_var)
+                else:
+                    for x1, y1 in product(range(x_bound), range(y_bound - len(w1) + 1)):
+                        for x2, y2 in product(range(max(0, x1 - len(w2) + 1), min(x1 + 1, x_bound - len(w2) + 1)), range(y1, y1 + len(w1))):
+                            are_compatible, intersection_type = compatibility_check(w1, is_hor_1, w2, is_hor_2, x1 - x2, y2 - y1)
+                            if not are_compatible or intersection_type not in allowed_intersection_types or intersection_type is not None and (w1, w2) in forbidden_crossings:
+                                yield [-cache_1[x1][y1], -cache_2[x2][y2]]
+                            elif are_compatible and intersection_type is not None and (w1, w2) not in forbidden_crossings and pairwise_intersection_vars is not None:
+                                new_var = vpool.id()
+                                yield from gen_conjunction(new_var, [cache_1[x1][y1], cache_2[x2][y2]])
+                                pairwise_intersection_vars[iw1][iw2].append(new_var)
 
 
 def ensure_nonempty_first_row_and_column(is_x_coord, is_y_coord):
