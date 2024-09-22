@@ -38,7 +38,6 @@ class IntersectionOptions:
 
 @dataclasses.dataclass
 class CrosswordOptions:
-    max_skewness: float = None
     min_isolated_component_size: int = 2
     allowed_intersection_types: list[IntersectionType] = None
     min_words_with_many_intersections: IntersectionOptions = None

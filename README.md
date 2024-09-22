@@ -29,21 +29,18 @@ python crossword_generator.py --x_bound <width> --y_bound <height> --words <word
 * **Comma-separated list:**  Provide a comma-separated list of words on the command line using the `--words` argument.
 * **JSON file:** Create a JSON file with a list of words, optionally including hints. Each word can be a string or a dictionary with keys `word` and `hint`.
 
-```json
+```
 [
-  "hello",
-  "world",
   {"word": "python", "hint": "A popular programming language"},
-  "coding"
+  …
 ]
 ```
 
 #### Options
 *JSON file:* Create a JSON file with the following options:
 
-```json
+```
 {
-  "max_skewness": <float>,
   "min_isolated_component_size": <int>,
   "allowed_intersection_types": [<IntersectionType>],
   "min_words_with_many_intersections": {
@@ -105,7 +102,7 @@ Solution saved to output.json
 ```
 
 **The resulting contents of `output.json`:**
-```json
+```
 [
   {
     "word": "spoon",
