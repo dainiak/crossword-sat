@@ -1,3 +1,7 @@
+import warnings
+
+warnings.filterwarnings("ignore")
+
 import argparse
 import dataclasses
 import json
@@ -9,10 +13,7 @@ from typing import Any, Iterable, Optional
 
 import pysat.card as pysat_card
 from pysat.formula import IDPool
-from pysat.solvers import (
-    Glucose4,
-    Mergesat3,
-)
+from pysat.solvers import Glucose4, Mergesat3, Lingeling, MinisatGH, CryptoMinisat
 
 
 class IntersectionType(IntEnum):
@@ -448,6 +449,18 @@ def make_problem(words, x_bound, y_bound, options: CrosswordOptions = None):
             vpool=id_pool,
         )
     )
+
+    if options.required_crossings:
+        if not all(pairwise_intersection_vars[iw1][iw2] for iw1, iw2 in options.required_crossings):
+            print(
+                "Warning: provided required crossings are not all feasible. Taking only feasible crossings into account."
+            )
+        clauses.extend(
+            pairwise_intersection_vars[iw1][iw2]
+            for iw1, iw2 in options.required_crossings
+            if pairwise_intersection_vars[iw1][iw2]
+        )
+
     clauses.extend(
         bound_isolated_component_size(pairwise_intersection_vars, options.min_isolated_component_size, vpool=id_pool)
     )
@@ -465,7 +478,7 @@ def make_problem(words, x_bound, y_bound, options: CrosswordOptions = None):
             vars_[is_horizontal][0][y]
             for vars_ in placement_vars
             for is_horizontal in (0, 1)
-            for y in range(len(vars_[is_horizontal][0]))
+            for y in range(len(vars_[is_horizontal][0]) if vars_[is_horizontal] else 0)
         ]
     )
     clauses.append(
@@ -482,13 +495,11 @@ def make_problem(words, x_bound, y_bound, options: CrosswordOptions = None):
     clauses.extend(require_placements(placement_vars, options.required_placements))
     clauses.extend(forbid_placements(placement_vars, options.forbidden_placements))
 
-    print("Sorting and deduplicating...")
-
     return placement_vars, list(set(map(tuple, map(sorted, clauses))))
 
 
-def solve_problem(words, placement_vars, clauses, sat_solver):
-    with sat_solver() as solver:
+def solve_problem(words, placement_vars, clauses, solver_class):
+    with solver_class() as solver:
         for clause in clauses:
             solver.add_clause(clause)
 
@@ -505,6 +516,20 @@ def solve_problem(words, placement_vars, clauses, sat_solver):
                             result.append(WordPlacement(word=iw, x=x, y=y, horizontal=bool(is_horizontal)))
                             break
         return result
+
+
+def get_bounds_from_solution(words, placement_data: list[WordPlacement]):
+    x_bound = 0
+    y_bound = 0
+
+    for data in placement_data:
+        for i, c in enumerate(words[data.word]):
+            if data.horizontal:
+                x_bound = max(x_bound, data.x + i + 1)
+            else:
+                y_bound = max(y_bound, data.y + i + 1)
+
+    return x_bound, y_bound
 
 
 def print_solution(words, placement_data: list[WordPlacement], x_bound, y_bound):
@@ -524,31 +549,26 @@ def print_solution(words, placement_data: list[WordPlacement], x_bound, y_bound)
     print("\n".join(" ".join(row) for row in grid))
 
 
-def print_dimacs(clauses):
-    n_clauses = len(clauses)
-    n_vars = max(map(abs, (lit for clause in clauses for lit in clause)))
-    print("p cnf 1000", len(clauses))
-    with open("output.cnf", "w") as f:
-        f.write(f"p cnf {n_vars} {n_clauses}\n")
-        f.write("\n".join(" ".join(str(lit) for lit in clause) + " 0" for clause in clauses))
-
-
-def save_solution(placement_data: list[WordPlacement], words_with_hints: list):
-    jsonified = json.dumps(
-        [
-            {
-                "word": words_with_hints[data.word]["word"],
-                "x": data.x,
-                "y": data.y,
-                "horizontal": data.horizontal,
-                "hint": words_with_hints[data.word]["hint"],
-            }
-            for data in placement_data
-        ],
-        indent=2,
+def save_solution(path: Path, placement_data: list[WordPlacement], words_with_hints: list):
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "word": words_with_hints[data.word]["word"]
+                    if isinstance(words_with_hints[data.word], dict)
+                    else words_with_hints[data.word],
+                    "x": data.x,
+                    "y": data.y,
+                    "horizontal": data.horizontal,
+                    "hint": words_with_hints[data.word]["hint"]
+                    if isinstance(words_with_hints[data.word], dict)
+                    else words_with_hints[data.word],
+                }
+                for data in placement_data
+            ],
+            indent=2,
+        )
     )
-
-    Path("output/output.js").write_text(f"var placement_data = {jsonified};")
 
 
 def solve_from_json(params_json):
@@ -636,38 +656,92 @@ def test():
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Crossword Solver CLI")
+    parser = argparse.ArgumentParser(description="Crossword Creator CLI")
+    parser.add_argument("--x_bound", type=int, required=True, help="Width of the crossword grid")
+    parser.add_argument("--y_bound", type=int, required=True, help="Height of the crossword grid")
     parser.add_argument(
         "--words", type=str, help="Comma-separated list of words or path to a JSON file containing words and hints"
     )
-    parser.add_argument("--x_bound", type=int, required=True, help="Width of the crossword grid")
-    parser.add_argument("--y_bound", type=int, required=True, help="Height of the crossword grid")
-    parser.add_argument("--options", type=str, help="Path to a JSON file containing crossword options")
+    parser.add_argument("--input", type=Path, required=False, help="Input file path")
+    parser.add_argument("--output", type=Path, required=False, help="Output file path")
+    parser.add_argument(
+        "--solver",
+        type=str,
+        default="Mergesat",
+        required=False,
+        help="Solver name (Glucose, Mergesat, Lingeling, MinisatGH, CryptoMinisat)",
+    )
+    parser.add_argument("--options", type=Path, required=False, help="Path to a JSON file containing crossword options")
+    parser.add_argument("--connected", type=bool, required=False, default=True, help="Require the crossword to be connected")
+
     return parser.parse_args()
-
-
-def load_words(words_arg):
-    if Path(words_arg).is_file():
-        with open(words_arg, "r") as f:
-            words_with_hints = json.load(f)
-        words = [w["word"].lower() for w in words_with_hints]
-    else:
-        words = words_arg.split(",")
-    return words
 
 
 def main():
     args = parse_args()
-    words = load_words(args.words)
+    solver_class = Mergesat3
+    if args.solver:
+        match args.solver.lower():
+            case "glucose":
+                solver_class = Glucose4
+            case "mergesat":
+                solver_class = Mergesat3
+            case "lingeling":
+                solver_class = Lingeling
+            case "minisatgh":
+                solver_class = MinisatGH
+            case "cryptominisat":
+                solver_class = CryptoMinisat
+            case _:
+                print(f'Invalid solver name: "{args.solver}". Using Mergesat3.')
 
-    options = None
+    if input_file := args.input:
+        words_with_hints = json.loads(input_file.read_text())
+        words = [(w["word"].lower() if isinstance(w, dict) else w.lower()) for w in words_with_hints]
+        print(f"Loaded {len(words)} words from file {input_file.name}")
+    elif args.words:
+        words = [w.strip().lower() for w in args.words.split(",")]
+        words_with_hints = words
+        print(f"Loaded {len(words)} words from command line")
+    else:
+        print("No words provided")
+        return
+
     if args.options:
         with open(args.options, "r") as f:
             options = CrosswordOptions(**json.load(f))
+    elif args.connected:
+        options = CrosswordOptions(
+            min_isolated_component_size=len(words),
+        )
+    else:
+        options = None
 
+    if guaranteed_infeasible(words, args.x_bound, args.y_bound):
+        print("No solution possible for provided words and grid size")
+        return
+
+    print("Generating SAT constraints")
     placement_vars, clauses = make_problem(words, args.x_bound, args.y_bound, options)
-    placement_data = solve_problem(words, placement_vars, clauses, Mergesat3)
-    print_solution(words, placement_data, args.x_bound, args.y_bound)
+    print(f"Got {len(clauses)} constraints; solving SAT problem using {solver_class.__name__}…")
+    solving_start_time = datetime.now()
+    placement_data = solve_problem(words, placement_vars, clauses, solver_class)
+    solving_end_time = datetime.now()
+    print(
+        f"Solving finished in {(solving_end_time - solving_start_time).total_seconds()} seconds.", end=""
+    )
+    x_bound, y_bound = get_bounds_from_solution(words, placement_data)
+    if x_bound:
+        print(" Generated crossword:")
+    else:
+        print(" No solution found")
+        return
+
+    print_solution(words, placement_data, x_bound, y_bound)
+
+    if output_file := args.output:
+        save_solution(output_file, placement_data, words_with_hints)
+        print(f"Solution saved to {output_file}")
 
 
 if __name__ == "__main__":
