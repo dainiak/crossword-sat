@@ -597,64 +597,6 @@ def solve_from_json(params_json):
     return json.dumps(placement_data, cls=EnhancedJSONEncoder)
 
 
-def test():
-    words_with_hints = [
-        {"word": "spoon", "hint": "A small tool we use for stirring soup and eating cereal."},
-        {"word": "fork", "hint": "It has three points; we use to pick up food like vegetables or meat."},
-        {"word": "pan", "hint": "We cook pancakes on this round, flat plate with a handle."},
-        {"word": "colander", "hint": "A bowl-shaped thing we use to drain water from pasta."},
-        {"word": "blender", "hint": "It's like a big machine that mixes food into smoothies or soups."},
-        {"word": "oven", "hint": "A place where we bake cookies and cakes to be yummy and hot."},
-        {"word": "spatula", "hint": "This flat tool helps us flip pancakes without breaking them."},
-        {"word": "whisk", "hint": "We use it to mix things like eggs or cream really well."},
-        {"word": "tongs", "hint": "A pair of tools with arms that help us pick up hot food from the stove."},
-        {"word": "mixer", "hint": "It has blades that spin around; we use it for making dough or whipping cream."},
-        {"word": "grater", "hint": "This tool with sharp holes helps us shred cheese into small pieces."},
-        {"word": "ladle", "hint": "It's a big spoon for scooping soup or stew into bowls."},
-        {"word": "peeler", "hint": "A small tool that takes off the skin of fruits and vegetables like apples."},
-        {"word": "scissors", "hint": "We use these to cut paper, but not for food; they're kitchen scissors."},
-        {"word": "thermometer", "hint": "A tool that tells us how hot our cooked meat is before we eat it."},
-        {"word": "sieve", "hint": "A tool with a mesh bottom that helps us sift flour or sugar."},
-        {"word": "pot", "hint": "We use this to cook soup or pasta on the stove; it has a lid."},
-        {"word": "scale", "hint": "A tool that helps us measure how much flour or sugar we need for a recipe."},
-    ]
-
-    words = [w["word"].lower() for w in words_with_hints]
-
-    x_bound = 11
-    y_bound = 8
-    stage_1_start = datetime.now()
-    print("Generating clauses...")
-    placement_vars, clauses = make_problem(
-        words,
-        x_bound,
-        y_bound,
-        CrosswordOptions(
-            min_isolated_component_size=20,
-            allowed_intersection_types=[
-                IntersectionType.CROSSING,
-                IntersectionType.VERTICAL_OVERLAP,
-                IntersectionType.HORIZONTAL_OVERLAP,
-            ],
-            # forbidden_cells=[(4, 4), (5, 5), (6, 6), (7, 7), (8, 8), (9, 9), (9, 0)]
-            # min_words_with_many_intersections=IntersectionOptions(intersections_bound=3, qty_bound=4)
-        ),
-    )
-    stage_2_start = datetime.now()
-    print("Clause generation took ", (stage_2_start - stage_1_start).total_seconds(), "s")
-    print("Number of clauses: ", len(clauses))
-    for solver in (Glucose4,):  # , Mergesat3, Glucose4, MinisatGH,
-        print("Solving with", solver.__name__)
-        stage_2_start = datetime.now()
-        placement_data = solve_problem(words, placement_vars, clauses, solver)
-        stage_3_start = datetime.now()
-        elapsed_time = (stage_3_start - stage_2_start).total_seconds()
-        print("Solving took ", elapsed_time, "s")
-
-    print("Solution:")
-    print_solution(words, placement_data, x_bound, y_bound)
-
-
 def parse_args():
     parser = argparse.ArgumentParser(description="Crossword Creator CLI")
     parser.add_argument("--x_bound", type=int, required=True, help="Width of the crossword grid")
@@ -672,7 +614,9 @@ def parse_args():
         help="Solver name (Glucose, Mergesat, Lingeling, MinisatGH, CryptoMinisat)",
     )
     parser.add_argument("--options", type=Path, required=False, help="Path to a JSON file containing crossword options")
-    parser.add_argument("--connected", type=bool, required=False, default=True, help="Require the crossword to be connected")
+    parser.add_argument(
+        "--connected", type=bool, required=False, default=True, help="Require the crossword to be connected"
+    )
 
     return parser.parse_args()
 
@@ -727,9 +671,7 @@ def main():
     solving_start_time = datetime.now()
     placement_data = solve_problem(words, placement_vars, clauses, solver_class)
     solving_end_time = datetime.now()
-    print(
-        f"Solving finished in {(solving_end_time - solving_start_time).total_seconds()} seconds.", end=""
-    )
+    print(f"Solving finished in {(solving_end_time - solving_start_time).total_seconds()} seconds.", end="")
     x_bound, y_bound = get_bounds_from_solution(words, placement_data)
     if x_bound:
         print(" Generated crossword:")
